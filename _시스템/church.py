@@ -257,8 +257,15 @@ def office_add(a):
     if a.role: m["직분"]=a.role
     save(db); print(f"✅ [{m['이름']}] 직분 이력: {a.date or today()} {a.role or ''} {a.memo or ''} · 현재 직분 {m['직분']}")
 def office_list(a):
-    """직분 이력·세례일 조회."""
-    db=load(); hit=find(db,a.name)
+    """직분 이력·세례일 조회 — 이름을 주면 그 교인 이력, 비우면 전체 직분 현황."""
+    db=load()
+    if not (getattr(a,'name','') or '').strip():
+        ms=db.get("교인",[]); print(f"■ 전체 직분 현황 ({len(ms)}명)")
+        for m in ms:
+            print(f"  · {m.get('이름','')} — {m.get('직분','') or '(직분 미지정)'}"+(f" · 세례 {m['세례일']}" if m.get('세례일') else ""))
+        if not ms: print("  (등록된 교인이 없습니다)")
+        return
+    hit=find(db,a.name)
     if not hit: print(f"✗ 교인 '{a.name}' 없음"); return
     m=hit[0]; oh=m.get("직분이력",[])
     print(f"■ {m['이름']} 직분 이력 {len(oh)}건 · 현재 {m.get('직분','')}")
@@ -421,8 +428,9 @@ def visit_brief(a):
     """다음 심방 전 브리핑 — 반복 방지(심방 기록 카드에 통합됨, CLI 호환용 유지)."""
     db=load(); hit=find(db,a.name)
     if not hit: print(f"✗ '{a.name}' 없음"); return
-    _visit_briefing(hit[0])
-    print(f"  ⚠ 이미 받은 기도제목(재질문 주의): {', '.join(m['기도제목누적']) if m['기도제목누적'] else '없음'}")
+    m=hit[0]; _visit_briefing(m)
+    pj=m.get('기도제목누적') or []
+    print(f"  ⚠ 이미 받은 기도제목(재질문 주의): {', '.join(pj) if pj else '없음'}")
     print("  ▶ 이번 심방은 위와 겹치지 않는 새 말씀·새 안부로 진행하세요.")
 
 # ───────── 명령: 증명서 자동발급 ─────────
@@ -929,14 +937,14 @@ def export_excel(a):
         return ws
     wb.remove(wb.active)
     sheet("교인명부",["ID","이름","성별","생년월일","연락처","주소","직분","세례","소속셀","인도자","등록일","상태"],
-        [[m["id"],m["이름"],m["성별"],m["생년월일"],m["연락처"],m["주소"],m["직분"],m["세례"],m["소속셀"],m["인도자"],m["등록일"],m["상태"]] for m in db["교인"]],"3C6E3C")
+        [[m.get("id",""),m.get("이름",""),m.get("성별",""),m.get("생년월일",""),m.get("연락처",""),m.get("주소",""),m.get("직분",""),m.get("세례",""),m.get("소속셀",""),m.get("인도자",""),m.get("등록일",""),m.get("상태","")] for m in db.get("교인",[])],"3C6E3C")
     vrows=[]
-    for m in db["교인"]:
-        for v in m["심방이력"]:
-            vrows.append([m["이름"],v["날짜"],v["구분"],v["심방자"],v["말씀"],v["내용"],"; ".join(v["기도제목"]),v["후속"]])
+    for m in db.get("교인",[]):
+        for v in m.get("심방이력",[]):
+            vrows.append([m.get("이름",""),v.get("날짜",""),v.get("구분",""),v.get("심방자",""),v.get("말씀",""),v.get("내용",""),"; ".join(v.get("기도제목") or []),v.get("후속","")])
     sheet("심방이력",["이름","날짜","구분","심방자","말씀","내용","기도제목","후속"],vrows,"3C6E3C")
-    sheet("출석",["날짜","예배","남","여","새신자","계"],[[r["날짜"],r["예배"],r["남"],r["여"],r["새신자"],r["계"]] for r in db["출석"]],"1B2A4A")
-    sheet("재정",["날짜","구분","항목","금액","교인","메모"],[[r["날짜"],r["구분"],r["항목"],r["금액"],r["교인"],r["메모"]] for r in db["재정"]],"A67C1E")
+    sheet("출석",["날짜","예배","남","여","새신자","계"],[[r.get("날짜",""),r.get("예배",""),r.get("남",""),r.get("여",""),r.get("새신자",""),(r.get("계") if r.get("계") is not None else (len(r["명단"]) if isinstance(r.get("명단"),list) else (r.get("남",0)+r.get("여",0))))] for r in db.get("출석",[])],"1B2A4A")
+    sheet("재정",["날짜","구분","항목","금액","교인","메모"],[[r.get("날짜",""),r.get("구분",""),r.get("항목",""),r.get("금액",""),r.get("교인",""),r.get("메모","")] for r in db.get("재정",[])],"A67C1E")
     sheet("설교이력",["날짜","예배","제목","본문","시리즈"],[[s.get("날짜",""),s.get("예배",""),s.get("제목",""),s.get("본문",""),s.get("시리즈","")] for s in db.get("설교",[])],"5A4FCF")
     sheet("경조사",["날짜","종류","대상","내용","경조금"],[[e.get("날짜",""),e.get("종류",""),e.get("대상",""),e.get("내용",""),e.get("경조금","")] for e in db.get("경조사",[])],"8B2E2E")
     sheet("일정",["날짜","유형","장소","주제","담당"],[[e.get("날짜",""),e.get("유형",""),e.get("장소",""),e.get("주제",""),e.get("담당자","")] for e in db.get("일정",[])],"C25A2E")
@@ -1640,25 +1648,30 @@ BOOKALIAS={"창":"창세기","출":"출애굽기","시":"시편","잠":"잠언",
  "눅":"누가복음","요":"요한복음","행":"사도행전","롬":"로마서","고전":"고린도전서","고후":"고린도후서",
  "갈":"갈라디아서","엡":"에베소서","빌":"빌립보서","골":"골로새서","히":"히브리서","약":"야고보서","계":"요한계시록"}
 def bible(a):
-    """성경본문 불러오기 — bible/<역본>.json 에서. 역본: 개역개정 niv kjv"""
+    """성경본문 불러오기 — 개역개정.json 있으면 한국어 본문, 없으면 성구 주소중심 안내(본문은 본인 성경으로). --version web/kjv로 공개 영문 지정 가능."""
     import json as _j
-    ver=a.version or "개역개정"; path=os.path.join(BIBLEDIR,ver+".json")
-    if not os.path.exists(path):
-        avail=[f[:-5] for f in os.listdir(BIBLEDIR)] if os.path.isdir(BIBLEDIR) else []
-        print(f"✗ '{ver}' 성경 데이터 없음. 보유 역본: {avail or '없음'}")
-        print(f"  → 성경 텍스트 파일을 {BIBLEDIR}\\{ver}.json 형식으로 넣으면 즉시 작동합니다.")
-        print(f"  형식: {{\"요한복음\": {{\"3\": {{\"16\": \"하나님이 세상을...\"}}}}}}"); return
-    bib=_j.load(open(path,encoding='utf-8'))
+    ver, path = _bible_ver(a.version)   # L분기: --version 지정 그대로 / 없으면 개역개정 있으면 개역개정·없으면 주소중심
     # 관대한 인식 — 장/절/전각콜론/물결/띄어쓰기 다 허용. 예: 요한복음3:16 · 요 3:16-18 · 요한복음 3장 16절 · 요한복음 3(장 전체)
     ref=(a.ref or "").strip().replace("：",":").replace("．",":").replace("장",":").replace("절","").replace("~","-").replace(" -","-").replace("- ","-")
     m=re.match(r'\s*([1-9]?[가-힣]+|[A-Za-z]+)\s*[:：]?\s*(\d+)\s*(?::\s*(\d+)(?:\s*-\s*(\d+))?)?',ref)
     if not m: print("✗ 참조 형식: '요한복음 3:16' · '요 3:16-17' · '요한복음 3'(장 전체)"); return
     book=BOOKALIAS.get(m.group(1),m.group(1)); ch=m.group(2)
+    if m.group(3):   # 절 지정
+        v1=int(m.group(3)); v2=int(m.group(4) or m.group(3)); rng=f"{ch}:{v1}{'-'+str(v2) if v2!=v1 else ''}"
+    else:            # 장 전체
+        v1=v2=None; rng=f"{ch}장 전체"
+    if path is None:   # 주소중심 — 본문 미포함(개역개정 저작권). 성구 주소만 안내
+        print(f"【{book} {rng}】  · 성구 주소 안내")
+        print(f"  위 말씀을 목사님의 성경(또는 개역개정 앱)에서 찾아 읽으세요.")
+        print(f"  ※ 이 배포판에는 개역개정 본문이 저작권상 포함되어 있지 않습니다.")
+        print(f"  ※ 영어 본문이 필요하시면 ‘역본’을 web 또는 kjv로 지정하세요(공개 역본).")
+        return
+    bib=_j.load(open(path,encoding='utf-8'))
     chap=bib.get(book,{}).get(ch,{})
     if not chap: print(f"✗ {book} {ch}장 본문 없음(역본·책이름 확인)"); return
-    if m.group(3):   # 절 지정
-        v1=int(m.group(3)); v2=int(m.group(4) or m.group(3)); verses=list(range(v1,v2+1)); label=f"{ch}:{v1}{'-'+str(v2) if v2!=v1 else ''}"
-    else:            # 장 전체
+    if v1 is not None:   # 절 지정
+        verses=list(range(v1,v2+1)); label=rng
+    else:                # 장 전체
         vs=sorted(int(k) for k in chap.keys() if str(k).isdigit()); verses=vs; label=f"{ch}장 전체({len(vs)}절)"
     out=[f"{v} {chap[str(v)]}" for v in verses if str(v) in chap]
     if not out: print(f"✗ {book} {ch} 본문 없음(데이터 확인)"); return
@@ -1771,7 +1784,9 @@ def bible_quiz(a):
     struct_path = path or os.path.join(BIBLEDIR,"web.json")   # 절 구조는 web에서라도(주소중심)
     if not os.path.exists(struct_path): print("✗ 성경 구조 데이터가 없습니다(bible/web.json 확인)."); return
     bib=json.load(open(struct_path,encoding='utf-8'))
-    m=re.match(r'\s*([1-9]?[가-힣]+)\s*(?:(\d+)(?::(\d+)(?:-(\d+))?)?)?\s*$', a.ref)
+    qref=(a.ref or "").strip().replace("：",":").replace("．",":").replace("장"," ").replace("절","").replace("~","-").replace(" -","-").replace("- ","-")  # 관대한 인식: '창세기1장'·'요한복음 3:16' 등 허용
+    qref=re.sub(r'(\d)\s*편', r'\1 ', qref)   # '시편23편'→'시편23 ' (숫자 뒤 '편'만 장표시로 제거 · 책이름 '시편'은 보존)
+    m=re.match(r'\s*([1-9]?[가-힣]+)\s*(?:(\d+)(?::(\d+)(?:-(\d+))?)?)?\s*$', qref)
     if not m: print("✗ 범위 형식: '요한복음 3' 또는 '요한복음 3:1-16' 또는 '요한복음'"); return
     book=BOOKALIAS.get(m.group(1),m.group(1))
     if book not in bib: print(f"✗ '{book}' 없음(성경 데이터 확인)"); return
@@ -2141,7 +2156,11 @@ def weekly_brief(a):
     import datetime as _dt
     db=load(); act=[m for m in db["교인"] if m.get("상태","재적")=="재적"]
     L=[f"■ {CHURCH} 주간 목회 브리핑  ({today()})",f"· 재적 교인 {len(act)}명"]
-    if db["출석"]: last=db["출석"][-1]; L.append(f"· 최근 출석: {last['날짜']} {last['예배']} {last['계']}명")
+    if db.get("출석"):
+        last=db["출석"][-1]; cnt=last.get('계')
+        if cnt is None:
+            md=last.get('명단'); cnt=len(md) if isinstance(md,list) else (last.get('남',0)+last.get('여',0))
+        L.append(f"· 최근 출석: {last.get('날짜','')} {last.get('예배','')} {cnt}명")
     ym=today()[:7]; rec=[r for r in db["재정"] if r['날짜'].startswith(ym)]
     inc=sum(r['금액'] for r in rec if r['구분']=='수입'); exp=sum(r['금액'] for r in rec if r['구분']=='지출')
     L.append(f"· 이번달 재정: 수입 {inc:,} · 지출 {exp:,} · 잔액 {inc-exp:,}원")
@@ -2198,15 +2217,15 @@ def schedule_add(a):
     print(f"✅ 일정 등록: {a.date or today()} [{a.type or '집회'}] {a.place or ''} — {a.theme or ''}")
 def schedule_list(a):
     import datetime as _dt
-    db=load(); evs=sorted(db.get("일정",[]),key=lambda e:e["날짜"])
-    if a.upcoming: evs=[e for e in evs if e["날짜"]>=today()]
+    db=load(); evs=sorted([e for e in db.get("일정",[]) if e.get("유형")],key=lambda e:str(e.get("날짜","")))  # 집회일정(유형 보유)만 — event-add의 일반일정과 db 공유 구분
+    if a.upcoming: evs=[e for e in evs if str(e.get("날짜",""))>=today()]
     print(f"■ 집회·초청 일정 {len(evs)}건"+(" (다가오는)" if a.upcoming else ""))
     for e in evs:
         try:
             dd=(_dt.date.fromisoformat(e["날짜"])-_dt.date.today()).days
             tag=f"D-{dd}" if dd>0 else ("D-DAY" if dd==0 else f"({-dd}일전)")
         except Exception: tag=""
-        line=f"  · {e['날짜']} {tag} [{e['유형']}] {e['장소']} — {e.get('주제','')}"
+        line=f"  · {e.get('날짜','')} {tag} [{e.get('유형','')}] {e.get('장소','')} — {e.get('주제','')}"
         if e.get("담당자"): line+=f" · {e['담당자']}({e.get('연락처','')})"
         if e.get("사례"): line+=f" · 사례 {e['사례']}"
         print(line)
@@ -2849,17 +2868,35 @@ def hwp_convert(a):
     if not targets: print("변환할 docx 없음"); return
     try: subprocess.run(["taskkill","/F","/IM","Hwp.exe"],capture_output=True)
     except Exception: pass
-    hwp=w.gencache.EnsureDispatch("HWPFrame.HwpObject")
+    try: hwp=w.gencache.EnsureDispatch("HWPFrame.HwpObject")
+    except Exception: print("✗ .hwp 변환은 Windows + 한글(한컴오피스) + pywin32 설치 필요. (docx는 한글에서 바로 열립니다)"); return
     try: hwp.RegisterModule("FilePathCheckDLL","FilePathCheckerModule")
     except Exception: pass
-    hwp.SetMessageBoxMode(0x20000); done=0
+    hwp.SetMessageBoxMode(0x20000); done=0; fail=0
     for p in targets:
         out=os.path.splitext(p)[0]+".hwp"
-        try: hwp.Open(p); hwp.SaveAs(out,"HWP"); hwp.Clear(1); done+=1
-        except Exception: pass
+        try:
+            opened=hwp.Open(p)             # 열림 여부 확인 — 안 열리면(보안 차단 등) SaveAs 무한대기 방지 위해 건너뜀
+            if not opened:
+                fail+=1
+                try: hwp.Clear(1)
+                except Exception: pass
+                continue
+            hwp.SaveAs(out,"HWP")
+            try: hwp.Clear(1)
+            except Exception: pass
+            if os.path.exists(out) and os.path.getsize(out)>0: done+=1   # 실제 파일 생성 검증(SaveAs 반환만 믿지 않음)
+            else: fail+=1
+        except Exception: fail+=1
     try: hwp.Quit()
     except Exception: pass
-    print(f"✅ 한글(.hwp) 변환 {done}개 완료 (docx와 같은 폴더에 저장)")
+    if done:
+        print(f"✅ 한글(.hwp) 변환 {done}개 완료 (docx와 같은 폴더에 저장)")
+        if fail: print(f"   ※ {fail}개는 변환되지 않았습니다 — 해당 docx를 한글에서 직접 열어 ‘다른 이름으로 저장 > 한글 문서(.hwp)’ 하세요.")
+    else:
+        print("✗ 한글 자동변환이 이 컴퓨터에서는 되지 않았습니다 (한컴오피스 자동화 보안모듈 미준비).")
+        print("   방법: ① 만든 docx 파일을 더블클릭해 한글로 엽니다  ② [파일]>[다른 이름으로 저장]>파일형식 ‘한글 문서(*.hwp)’로 저장.")
+        print("   ※ docx도 한글에서 그대로 열려 편집·인쇄됩니다 — 꼭 .hwp가 필요할 때만 위 방법을 쓰세요.")
 def print_file(a):
     """프린터 직접 출력 — 파일(docx/xlsx/pdf/hwp/pptx)을 기본 프린터로 전송. (Windows)"""
     p=a.file
@@ -3129,7 +3166,7 @@ def menu(a):
                 else: print("  현재 최신 버전입니다.")
             else: print("→ 없는 번호입니다.")
         except Exception as e: print("오류:",e)
-VERSION="2026-07-22 (목양: 주간출석·장기결석자·목양카드 / 설교: 연간계획표·AI심화질문 / 단기선교 상세 길잡이 / 헌금봉투집계표 / 카드검색·지난자료 찾기 개선)"
+VERSION="2026-07-23 (목양: 주간출석·장기결석자·목양카드 / 설교: 연간계획표·AI심화질문 / 단기선교 상세 / 헌금봉투집계표 / 검색·지난자료 개선 / ★안정화: 심방브리핑·달력인쇄·집회일정·주간브리핑·엑셀관리대장·성경카드 수정)"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
@@ -3632,14 +3669,14 @@ def cal_print(a):
     weeks=_cal.Calendar(firstweekday=6).monthdayscalendar(y,mo)   # 일요일 시작
     t=d.add_table(rows=1+len(weeks),cols=7)
     for j,h in enumerate(["일","월","화","수","목","금","토"]):
-        c=t.rows[0].cells[j]; ctext(c,h,WHITE,True,AL.CENTER); shade(c,"1B2A4A")
+        c=t.rows[0].cells[j]; ctext(c,h,11,WHITE,True,SANS,AL.CENTER); shade(c,"1B2A4A")
     for i,wk in enumerate(weeks,1):
         for j,day in enumerate(wk):
             c=t.rows[i].cells[j]
             if day==0: continue
             lines=str(day)
-            for e in byday.get(day,[]): lines+="\n"+("★" if e.get("중요") else "·")+str(e.get("제목",""))[:11]
-            ctext(c,lines,NAVY if byday.get(day) else GRAY,False,AL.LEFT)
+            for e in byday.get(day,[]): lines+="\n"+("★" if e.get("중요") else "·")+str(e.get("제목") or e.get("주제") or e.get("유형",""))[:11]
+            ctext(c,lines,10,NAVY if byday.get(day) else GRAY,False,SANS,AL.LEFT)
     tborders(t,"BBBBBB",4)
     out=os.path.join(CAT("01"),f"[일정달력] {sanit(ym)}_{today()}.docx"); _savedoc(d,out)
     print(f"✅ {y}년 {mo}월 일정 달력: {out}")
@@ -3805,6 +3842,15 @@ def manual(a):
       "🔥 피닉스 복구: 실수로 지워져도 지난 시점으로 언제든 되살립니다(자동 스냅샷).",
       "💾 자료 백업: 언제든 전체 백업 / 🔔 업데이트: 새 기능이 오면 표시등이 켜지고 눌러서 업데이트",
       "💡 기능 요청: 원하는 기능을 적으면 담당자에게 전달되어 다음 업데이트에 반영됩니다."]),
+     ("🔥 피닉스 복구 — 실수로 지운 자료 되살리기 (꼭 알아두세요)",[
+      "이것이 무엇인가: 교인·설교·재정 자료를 저장할 때마다 그 순간의 사진(스냅샷)을 자동으로 찍어 최근 60개까지 보관합니다. 그래서 실수로 지우거나 잘못 고쳐도 지난 시점으로 되살릴 수 있습니다.",
+      "언제 쓰나: ①교인을 실수로 삭제했을 때  ②재정·심방 기록을 잘못 지웠거나 엉뚱하게 고쳤을 때  ③자료가 이상해진 것 같을 때 — 언제든.",
+      "되살리는 방법 (아주 쉽습니다):",
+      "   1) 대시보드에서 ‘🔥 피닉스 복구’ 카드를 누릅니다 (간편메뉴에서는 77번).",
+      "   2) 지난 복구 시점들이 날짜·시각과 함께 목록으로 뜹니다 — 각 시점의 교인 수·설교 수도 같이 보여, 언제로 되살릴지 고르기 쉽습니다.",
+      "   3) 되살리고 싶은 시점을 고르면 그 시점으로 자료가 되돌아옵니다. 방금 전 상태로 급히 되살리려면 ‘가장 최근으로 복구’를 누르세요.",
+      "🔒 이중 안전장치: 복구를 실행하면 ‘지금 상태’도 따로 백업해 둡니다. 그래서 혹시 시점을 잘못 골라 복구해도 다시 되돌릴 수 있습니다 — 어떤 경우에도 자료가 사라지지 않습니다.",
+      "TIP: 스냅샷은 저장할 때마다 자동으로 쌓이므로 목사님이 평소 하실 일은 없습니다. ‘복구가 필요할 때 이 카드만 기억하세요.’"]),
      ("★ USB·D 자동 이중저장 (안전이 최고)",[
       "왜: 컴퓨터가 고장나거나 실수로 지워도, USB나 D드라이브에 똑같이 있으면 자료를 잃지 않습니다.",
       "설정(딱 한 번): ‘USB·D 자동저장 설정’ 카드(또는 set-backup)에 폴더를 넣으세요. 예) USB는 E:\\교회백업, D드라이브는 D:\\교회백업",
@@ -3816,6 +3862,31 @@ def manual(a):
         para(d,title,15,NAVY,True,before=6,after=4,font=SANS); hr(d,"1B2A4A",6,0,8)
         for ln in lines: para(d,"· "+ln,10.5,after=4)
         para(d,"",after=4)
+    # ── 전체 기능 자동 목록 (실제 카드에서 읽어 매뉴얼과 항상 동기화 — 새 기능 추가 시 자동 반영) ──
+    try:
+        _cw=open(os.path.join(BASE,"church_web.py"),encoding='utf-8').read()
+        _i=_cw.index("ACTIONS="); _s=_cw.index("[",_i); _depth=0; _blk=""
+        for _k in range(_s,len(_cw)):
+            if _cw[_k]=="[": _depth+=1
+            elif _cw[_k]=="]":
+                _depth-=1
+                if _depth==0: _blk=_cw[_s:_k+1]; break
+        _ACTIONS=eval(_blk) if _blk else []
+    except Exception: _ACTIONS=[]
+    if _ACTIONS:
+        d.add_page_break()
+        para(d,"전체 기능 한눈에 보기",16,NAVY,True,AL.CENTER,after=2,font=SANS)
+        para(d,f"이 프로그램의 모든 기능입니다 (v{VERSION} 기준 · 업데이트할 때마다 이 목록도 자동으로 갱신됩니다).",9.5,GRAY,AL.CENTER,after=8,font=SANS)
+        _groups=[]
+        for _a in _ACTIONS:
+            if _a[0] not in _groups: _groups.append(_a[0])
+        for _g in _groups:
+            para(d,f"◆ {_g}",13,MAROON,True,before=8,after=3,font=SANS)
+            for _a in _ACTIONS:
+                if _a[0]!=_g: continue
+                _title=str(_a[2]); _desc=(str(_a[5]) if len(_a)>5 and _a[5] else "")
+                para(d,f"· {_title}",11,NAVY,True,after=(1 if _desc else 3),font=SANS)
+                if _desc: para(d,f"   {_desc}",10,after=3)
     para(d,"※ 이 프로그램은 무료입니다. 서버비·사용료가 없습니다(공개 라이브러리·퍼블릭도메인 성경 사용).",9.5,MAROON,italic=True,before=6,font=SANS)
     para(d,"※ 성경 개역개정·NIV, 남의 주석·묵상 전문을 복제 배포하지 마세요(저작권). 성구 주소+창작 묵상은 안전.",9,LG,before=2,font=SANS)
     hr(d,"C9BF9E",8); para(d,"【저작권 및 이용 안내】",10,NAVY,True,before=8,after=2,font=SANS)
