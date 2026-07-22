@@ -2333,25 +2333,82 @@ def mission_plan(a):
     try: depd=_dt.date.fromisoformat(a.dday) if a.dday else None
     except Exception: depd=None
     para(d,(f"출국 {a.dday}  ·  " if a.dday else "")+f"{CHURCH} · {today()}",10,GRAY,AL.CENTER,after=6,font=SANS); hr(d,"1F5C9E",12)
-    stages=[(-75,"팀 구성·국가/일정 확정",["팀원 모집·확정","국가·목적지·기간 확정","여권 유효기간 확인(6개월+)","항공권 예약","예산·후원 계획 수립"]),
-      (-45,"서류·건강 착수",["비자 신청","예방접종 시작(황열·A형간염 등)","여행자보험 가입","숙소 예약","미성년자 부모동의서 배부"]),
-      (-30,"사역 준비 시작",["찬양·율동·드라마 콘티","전도지·선물·간증문 준비","팀 훈련 시작","현지 교회·코디네이터 연락"]),
-      (-21,"팀 훈련·리허설",["공연·사역 리허설","역할·조 배정","현지 언어 인사·문화 교육","팀 티셔츠·배너 제작"]),
-      (-14,"물품·개인 준비",["환전","유심/로밍","팀 구급함·상비약","짐 목록 배부","단체 카톡방 개설"]),
-      (-7,"최종 점검·안전",["부모동의서·비상연락망 취합","출국 전 안전교육","여권 사본 일괄 보관","현지 일정 최종 확인","팀원 건강·알레르기 파악"]),
-      (-1,"출국 전날",["개인 짐 싸기","여권·항공권·서류 최종 확인","집결 시간·장소 공지","비상약·귀중품 점검"]),
-      (0,"출국 당일",["공항 집결·인원 점검","여권·수하물 확인","파송·출국 기도"])]
+    para(d,"※ 처음 단기선교를 준비하는 팀을 위한 단계별 길잡이입니다. 위에서부터 하나씩 체크하며 준비하세요. (★ = 특히 중요·일찍 할수록 좋음)",10,GRAY,before=2,after=8,font=SANS)
+    stages=[
+      (-90,"D-90 이상 · 기획과 결정 (가장 먼저 할 일)",[
+        "선교지·파트너 교회(현지 사역지) 선정",
+        "팀 구성·인원 확정 (인솔자·회계·사역별 담당 정하기)",
+        "선교 목적·사역 방향 결정 (전도 / 의료 / 건축 / 어린이 / 찬양 등)",
+        "전체 예산 편성 (항공·숙소·현지경비·사역비·예비비)",
+        "당회·파송교회 승인 및 보고",
+        "★여권 유효기간 확인 — 출국일 기준 남은 기간 6개월 이상이어야 입국 가능",
+        "여권이 없거나 만료 임박하면 → 즉시 발급·재발급 신청 (2~3주 소요)"]),
+      (-60,"D-60 (약 2개월 전) · 항공·숙소·서류 (일찍 할수록 저렴)",[
+        "★항공권 예약·발권(티케팅) — 일찍 예약할수록 저렴, 경유편·수하물 규정·좌석 확인",
+        "★현지 숙소·호텔 예약 — 현지 선교사/코디 추천지 우선, 안전·위치 확인",
+        "비자 필요 여부 확인 → 필요하면 지금 신청 시작(국가별 절차·기간 상이)",
+        "예방접종 1차 — 국가별 필수 백신(황열·A형간염·장티푸스 등) 국립검역소/보건소 문의",
+        "여행자보험 가입 계획 (선교·오지·의료비 커버 상품 확인)",
+        "현지 선교사·코디네이터에게 연락 → 일정·사역 내용 협의 시작"]),
+      (-45,"D-45 (약 1개월 반 전) · 팀 훈련·후원",[
+        "팀 훈련 시작 (성경·현지 문화·기본 언어·영성·팀워크)",
+        "사역 프로그램 기획·준비 (율동·드라마·전도 방법·의료·건축 설계 등)",
+        "후원 모금·후원 편지 발송, 후원자 명단 관리",
+        "미성년자 참가자 부모동의서·서약서 배부",
+        "예방접종 2차 (백신 접종 간격 확인)",
+        "개인·팀 상비약과 구급함에 넣을 품목 목록 작성"]),
+      (-30,"D-30 (1개월 전) · 준비 실행",[
+        "항공권·좌석·마일리지 최종 확인",
+        "비자 발급 완료 확인 (아직이면 즉시 독촉·확인)",
+        "사역 물품·교재·선물 구입 (전도지·성경·학용품·악기·의약품 등)",
+        "팀 티셔츠·배너·현수막·명찰 제작",
+        "현지 안전·치안·기후 정보 파악, 현지 대사관·영사관 연락처 확보",
+        "여행자보험 최종 가입",
+        "말라리아 위험 지역이면 예방약 처방받기 (복용 시작 시점 의사에게 확인)"]),
+      (-14,"D-14 (2주 전) · 점검·개인 준비",[
+        "개인 준비물 목록 배부 (옷·세면도구·상비약·전원 어댑터·우산 등)",
+        "환전 계획 세우기 (달러·현지 화폐), 카드 해외사용 등록",
+        "휴대폰 유심/로밍/eSIM 준비",
+        "비상연락망 작성 (팀·가족·현지 선교사·대사관·보험사)",
+        "팀별·조별 역할 최종 배정",
+        "단체 카톡방 개설·공지 체계 마련",
+        "짐 목록표 배부 (수하물 무게 제한·기내 금지품목 안내)"]),
+      (-7,"D-7 (1주 전) · 최종 마무리",[
+        "최종 팀 미팅·사역 리허설 (공연·전도 시연)",
+        "파송 예배 준비 (순서·기도·강단 광고)",
+        "현지 일정표 최종 확정·팀 공유",
+        "긴급상황 대응 매뉴얼 배부 (여권 분실·질병·사고 시 행동요령)",
+        "여권 사본·비상 서류 2부 준비 (원본과 분리해 보관)",
+        "출국 전 안전교육 실시"]),
+      (-5,"D-5 (5일 전) · 건강·약 준비",[
+        "★구급약·개인 복용약 최종 점검·구입 — 지사제·해열제·진통제·소화제·감기약·밴드·소독약·상처연고·멀미약·모기기피제 + 평소 복용약(넉넉히)",
+        "말라리아 예방약 복용 시작 (해당 지역·처방 지시대로)",
+        "짐 1차 싸기 (수하물 무게 확인)"]),
+      (-3,"D-3 (3일 전)",[
+        "환전 완료·현금 분산 보관 준비",
+        "유심/로밍 최종 확인, 휴대폰·보조배터리·충전기 점검",
+        "짐 최종 점검 (수하물·기내 반입 분리)"]),
+      (-1,"D-1 (출국 전날)",[
+        "★여권·비자·항공권·현금·보험증서 최종 확인 (한 곳에 모아두기)",
+        "짐 재점검·무게 확인 (초과 시 조정)",
+        "집결 시간·장소 최종 공지",
+        "건강 상태 점검·충분한 휴식으로 컨디션 관리"]),
+      (0,"D-DAY (출국 당일)",[
+        "공항 집결·인원 점검 (국제선은 3시간 전 여유 있게)",
+        "여권·수하물·기내 반입 물품 확인",
+        "파송·출국 기도",
+        "현지 도착 → 인원·짐·입국심사 확인 후 숙소 이동"])]
     for off,title,items in stages:
         ds=""
         if depd: ds="  ("+(depd+_dt.timedelta(days=off)).isoformat()+")"
         head=(f"D{off}" if off<0 else "D-DAY")+ds
-        para(d,f"{head} · {title}",13,RGBColor(0x1F,0x5C,0x9E),True,before=8,after=3,font=SANS)
+        para(d,f"{head} · {title}",13,RGBColor(0x1F,0x5C,0x9E),True,before=9,after=3,font=SANS)
         for it in items: para(d,f"  ☐  {it}",11,after=2)
-    para(d,"현지 매일 점검 (일자별)",13,MAROON,True,before=10,after=3,font=SANS)
-    for it in ["인원 점검(아침·저녁)","건강·안전 확인","오늘 사역·준비물","현지 팀 소통","감사·나눔·기도","경비 기록"]:
+    para(d,"현지 체류 중 · 매일 점검",13,MAROON,True,before=11,after=3,font=SANS)
+    for it in ["아침·저녁 전원 인원 점검 (안전 확인)","팀원 건강·컨디션 확인 (탈수·장염 주의)","오늘 사역 준비물·동선 점검","현지 교회·코디와 소통·조율","★물·음식 위생 주의 (생수만 마시기·익힌 음식)","귀중품·여권 보관 상태 확인","저녁 팀 모임 — 감사·나눔·중보기도","경비 기록 (회계 담당)"]:
         para(d,f"  ☐  {it}",11,after=2)
-    para(d,"귀국 후",13,RGBColor(0x1F,0x5C,0x9E),True,before=10,after=3,font=SANS)
-    for it in ["학생 보호자 인계 확인","선교 보고서","사진·영상 정리","후원자 감사장","주일 간증·보고"]:
+    para(d,"귀국 후",13,RGBColor(0x1F,0x5C,0x9E),True,before=11,after=3,font=SANS)
+    for it in ["학생·미성년자 보호자 인계 확인","선교 보고서 작성","사진·영상 정리·보관","후원자 감사장·결과 보고","주일 간증·선교 보고 (회중과 은혜 나눔)","경비 결산·정산 (영수증 정리)","현지 사역지 후속 연락·중보기도 지속"]:
         para(d,f"  ☐  {it}",11,after=2)
     out=os.path.join(CAT("05"),f"[선교 준비타임라인] {sanit(a.title or '단기선교')}_{today()}.docx"); _savedoc(d,out)
     print(f"✅ 선교 준비 타임라인: {out}"+(f" (출국 {a.dday} 기준 날짜 계산)" if depd else " (--dday 출국일 넣으면 날짜 자동계산)"))
@@ -2948,7 +3005,7 @@ def _find_docs(kw, limit=20):
     return hits
 def open_file(a):
     """파일 불러오기 — 프로그램·D백업·문서폴더에 저장된 파일을 이름으로 찾아 엽니다."""
-    if a.file and (os.path.exists(a.file) or str(a.file).startswith("shell:")):
+    if a.file and (os.path.exists(a.file) or str(a.file).startswith(("shell:","http://","https://"))):
         try: os.startfile(a.file); print(f"▶ 여는 중: {os.path.basename(a.file) or a.file}")
         except Exception as e: print(f"✗ 열기 실패: {e} — 파일을 직접 더블클릭하세요")
         return
@@ -3072,7 +3129,7 @@ def menu(a):
                 else: print("  현재 최신 버전입니다.")
             else: print("→ 없는 번호입니다.")
         except Exception as e: print("오류:",e)
-VERSION="2026-07-21 (지난 설교·재활용에서 예전 설교 C·D·USB 바로 찾기 · 전 카드 '지난 자료 찾기' 버튼 · 안정화)"
+VERSION="2026-07-22 (목양: 주간출석·장기결석자·목양카드 / 설교: 연간계획표·AI심화질문 / 단기선교 상세 길잡이 / 헌금봉투집계표 / 카드검색·지난자료 찾기 개선)"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
@@ -4189,6 +4246,199 @@ def reference(a):
         if hp: print(f"   ✅ 한글(.hwp)도 저장: {hp}")
     # (문서 열기는 _savedoc가 자동 처리)
 
+def attend_check(a):
+    """주간 출석 체크 — 참석 성도 이름을 ;로 구분해 기록. 쌓이면 '장기결석자 찾기'가 자동으로 찾음."""
+    date=getattr(a,'date','') or today()
+    service=(getattr(a,'service','') or "주일예배").strip()
+    raw=(getattr(a,'names','') or "").strip()
+    db=load(); db.setdefault("출석",[])
+    if not raw:
+        recs=db["출석"]; print(f"■ 출석 기록 {len(recs)}회")
+        for r in sorted(recs,key=lambda x:x.get('날짜',''),reverse=True)[:8]:
+            print(f"  · {r.get('날짜','')} [{r.get('예배','')}] {len(r.get('명단',[]))}명")
+        if not recs: print("  (아직 없음) 참석자 이름을 ;로 구분해 넣으세요. 예) --names 김철수;이영희;박믿음")
+        return
+    names=[n.strip() for n in raw.replace(",",";").split(";") if n.strip()]
+    hit=next((r for r in db["출석"] if r.get("날짜")==date and r.get("예배")==service),None)
+    if hit:
+        for n in names:
+            if n not in hit["명단"]: hit["명단"].append(n)
+    else: db["출석"].append({"날짜":date,"예배":service,"명단":names})
+    db["출석"].sort(key=lambda r:r.get("날짜",""),reverse=True); save(db)
+    cur=next((r["명단"] for r in db["출석"] if r.get("날짜")==date and r.get("예배")==service),names)
+    print(f"✅ 출석 기록: {date} [{service}] · 이 날 누적 {len(cur)}명")
+    print("  → 매주 기록하시면 '장기결석자 찾기'가 오래 안 나오신 분을 자동으로 찾아 드립니다.")
+def long_absent(a):
+    """장기결석자 찾기 — 출석 기록으로 N주(기본 4) 이상 안 나오신 성도를 자동 명단·연락처로. '잃은 양' 챙기기."""
+    import datetime as _dt
+    wk=str(getattr(a,'weeks','') or '').strip(); weeks=int(wk) if wk.isdigit() and int(wk)>0 else 4
+    db=load(); att=db.get("출석",[]); members=db.get("교인",[])
+    if not att:
+        print("⚠ 아직 출석 기록이 없습니다. 먼저 '주간 출석 체크'로 매주 참석자를 몇 주 기록해 주세요."); return
+    cut=(_dt.date.today()-_dt.timedelta(weeks=weeks)).isoformat(); last={}
+    for r in att:
+        dt=r.get("날짜","")
+        for nm in r.get("명단",[]):
+            if dt>last.get(nm,""): last[nm]=dt
+    absent=[]
+    for m in members:
+        if (m.get("상태") or "") in ("전출","전출·이명","이명","사망","고인"): continue
+        nm=m.get("이름") or ""
+        if not nm: continue
+        seen=last.get(nm,"")
+        if not seen or seen<cut: absent.append((seen or "출석기록 없음",nm,m.get("소속셀") or "",m.get("연락처") or ""))
+    absent.sort(key=lambda x:x[0])
+    d=newdoc()
+    para(d,f"{CHURCH}  장기결석자 명단 ({weeks}주 이상)",20,NAVY,True,AL.CENTER,after=2,font=SANS)
+    para(d,f"기준일 {today()} · {cut} 이후 출석 없는 성도 · 총 {len(absent)}명",11,GRAY,AL.CENTER,after=8,font=SANS)
+    if absent:
+        t=d.add_table(rows=len(absent)+1,cols=4)
+        for j,h in enumerate(["최근 출석","이름","소속셀","연락처"]):
+            ctext(t.rows[0].cells[j],h,11,WHITE,True,SANS,AL.CENTER); shade(t.rows[0].cells[j],"8B2E2E")
+        for i,(seen,nm,cell,tel) in enumerate(absent,1):
+            ctext(t.rows[i].cells[0],seen,10.5,GRAY,font=SANS,align=AL.CENTER); ctext(t.rows[i].cells[1],nm,11,NAVY,True,SANS)
+            ctext(t.rows[i].cells[2],cell,10.5,GRAY,font=SANS); ctext(t.rows[i].cells[3],tel,10.5,GRAY,font=SANS)
+        tborders(t,"BBBBBB",4)
+        para(d,"※ 위 성도들께 안부 연락·심방을 권합니다. 심방 후 '심방 기록 & 브리핑'에 남기세요.",9.5,GRAY,before=8,font=SANS)
+    else: para(d,"🎉 최근 모두 잘 나오고 계십니다 — 장기결석자가 없습니다.",12,NAVY,before=6,font=SANS)
+    out=os.path.join(CAT("04"),f"[장기결석자] {today()}.docx"); _savedoc(d,out)
+    print(f"✅ 장기결석자 명단({weeks}주+): {out} · {len(absent)}명")
+    for seen,nm,cell,tel in absent[:12]: print(f"  · {nm} ({cell}) — 최근출석 {seen}"+(f" · {tel}" if tel else ""))
+def member_card(a):
+    """교인 목양 카드 — 한 성도의 정보·가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석을 한 장으로. 심방 전 파악용."""
+    name=(getattr(a,'name','') or "").strip()
+    if not name: print("교인 이름을 넣어 주세요. 예) member-card --name 홍길동"); return
+    db=load(); hit=find(db,name)
+    if not hit: print(f"✗ '{name}' 교인을 찾지 못했습니다. '교우 등록'에서 확인하세요."); return
+    m=hit[0]; nm=m.get("이름") or name; yr=today()[:4]
+    gifts=[r for r in db.get("재정",[]) if r.get("구분")=="수입" and (r.get("교인") or "")==nm]
+    gy=sum(int(r.get("금액") or 0) for r in gifts if (r.get("날짜") or "").startswith(yr))
+    gtot=sum(int(r.get("금액") or 0) for r in gifts)
+    cares=[e for e in db.get("경조사",[]) if (e.get("대상") or "")==nm]
+    last=""
+    for r in db.get("출석",[]):
+        if nm in r.get("명단",[]) and r.get("날짜","")>last: last=r.get("날짜","")
+    visits=m.get("심방이력",[]); prayers=m.get("기도제목누적",[]); train=m.get("양육이력",[]); fam=m.get("가족",[])
+    d=newdoc()
+    para(d,f"목양 카드 · {nm}",22,NAVY,True,AL.CENTER,after=1,font=SANS)
+    para(d," / ".join([x for x in [m.get('직분'),m.get('소속셀'),m.get('연락처')] if x]),11,GRAY,AL.CENTER,after=8,font=SANS); hr(d,"1F5C9E",12)
+    def sec(t): para(d,t,13,RGBColor(0x1F,0x5C,0x9E),True,before=9,after=3,font=SANS)
+    sec("■ 기본 정보")
+    for k,v in [("생년월일",m.get("생년월일","")),("결혼기념일",m.get("결혼기념일","")),("주소",m.get("주소","")),("세례",m.get("세례","")),("등록일",m.get("등록일","")),("최근 출석",last or "기록 없음")]:
+        if v: para(d,f"  · {k}: {v}",11,after=1)
+    if fam:
+        sec("■ 가족")
+        for f in fam: para(d,f"  · {f.get('이름','')} ({f.get('관계','')})"+(f" · {f.get('생년월일','')}" if f.get('생년월일') else ""),11,after=1)
+    sec("■ 심방 이력")
+    if visits:
+        for v in sorted(visits,key=lambda x:x.get('날짜',''),reverse=True)[:6]:
+            para(d,f"  · {v.get('날짜','')} [{v.get('구분','')}] {(v.get('말씀','') or v.get('내용','') or '').strip()}",11,after=1)
+    else: para(d,"  (심방 기록 없음 — 심방 후 '심방 기록'에 남기면 여기 쌓입니다)",11,GRAY,after=1)
+    if prayers:
+        sec("■ 기도제목")
+        for p in prayers[-8:]: para(d,f"  · {p}",11,after=1)
+    if train:
+        sec("■ 양육")
+        for tr in train[-6:]: para(d,f"  · {tr.get('과정','')} {tr.get('단계','')} — {tr.get('상태','')} ({tr.get('날짜','')})",11,after=1)
+    if cares:
+        sec("■ 경조사")
+        for e in cares[:6]: para(d,f"  · {e.get('날짜','')} [{e.get('종류','')}] {e.get('내용','')}",11,after=1)
+    sec("■ 헌금 (참고)")
+    para(d,f"  · 올해({yr}) 합계 {gy:,}원  ·  전체 누적 {gtot:,}원",11,after=1)
+    para(d,"  ※ 개인정보 카드입니다 — 취급에 유의하세요.",9,GRAY,before=6,font=SANS)
+    out=os.path.join(CAT("04"),f"[목양카드] {sanit(nm)}_{today()}.docx"); _savedoc(d,out)
+    print(f"✅ 목양 카드: {out}")
+    print(f"  {nm} · {m.get('직분','')} · {m.get('소속셀','')} · 심방 {len(visits)}회 · 최근출석 {last or '기록없음'} · 기도제목 {len(prayers)}개")
+def sermon_plan(a):
+    """연간 설교 계획표 — 그 해 모든 주일 자동 나열 + 절기 자동표시. 본문·제목·시리즈를 미리 계획(빈 표 채워 인쇄)."""
+    import datetime as _dt
+    y=int((getattr(a,'year','') or today()[:4]))
+    A=y%19;B=y//100;Cc=y%100;D=B//4;E=B%4;Ff=(B+8)//25;G=(B-Ff+1)//3
+    H=(19*A+B-D-G+15)%30;I=Cc//4;K=Cc%4;L=(32+2*E+2*I-H-K)%7;M=(A+11*H+22*L)//451
+    mo=(H+L-7*M+114)//31;da=((H+L-7*M+114)%31)+1; easter=_dt.date(y,mo,da)
+    def ns(dt): return dt-_dt.timedelta(days=(dt.weekday()+1)%7)
+    xmas=_dt.date(y,12,25); special={}
+    def mark(dt,label): special[ns(dt).isoformat()]=label
+    mark(_dt.date(y,1,1),"신년"); mark(easter-_dt.timedelta(days=7),"종려주일"); mark(easter,"부활절")
+    mark(easter+_dt.timedelta(days=49),"성령강림절")
+    j=_dt.date(y,7,1); mark(j+_dt.timedelta(days=(6-j.weekday())%7),"맥추감사주일")
+    n=_dt.date(y,11,1); mark(n+_dt.timedelta(days=(6-n.weekday())%7)+_dt.timedelta(days=14),"추수감사주일")
+    mark(xmas,"성탄절")
+    adv=ns(xmas)-_dt.timedelta(days=21)
+    for i in range(4): special.setdefault((adv+_dt.timedelta(days=7*i)).isoformat(),"대림절")
+    dcur=_dt.date(y,1,1); dcur=dcur+_dt.timedelta(days=(6-dcur.weekday())%7); sundays=[]
+    while dcur.year==y: sundays.append(dcur); dcur+=_dt.timedelta(days=7)
+    d=newdoc()
+    para(d,f"{CHURCH}  {y}년 연간 설교 계획표",20,NAVY,True,AL.CENTER,after=1,font=SANS)
+    para(d,f"주일 {len(sundays)}회 · 절기 자동표시 · 본문/제목/시리즈를 미리 계획하세요",10.5,GRAY,AL.CENTER,after=8,font=SANS)
+    t=d.add_table(rows=len(sundays)+1,cols=5)
+    for jj,h in enumerate(["날짜","주일·절기","본문","제목·주제","시리즈/비고"]):
+        ctext(t.rows[0].cells[jj],h,10.5,WHITE,True,SANS,AL.CENTER); shade(t.rows[0].cells[jj],"1F5C9E")
+    for i,su in enumerate(sundays,1):
+        lab=special.get(su.isoformat(),"")
+        ctext(t.rows[i].cells[0],su.strftime("%m/%d"),10,NAVY,font=SANS,align=AL.CENTER)
+        ctext(t.rows[i].cells[1],lab,10,(MAROON if lab else GRAY),bool(lab),SANS,AL.CENTER)
+        if lab: shade(t.rows[i].cells[1],"FBF3E4")
+    tborders(t,"BBBBBB",4)
+    para(d,"※ 절기는 자동 표시했습니다. 각 주일 본문·제목·시리즈를 채워 연간 설교를 미리 계획하세요.",9.5,GRAY,before=8,font=SANS)
+    out=os.path.join(CAT("09"),f"[연간설교계획] {y}.docx"); _savedoc(d,out)
+    print(f"✅ {y}년 연간 설교 계획표: {out} (주일 {len(sundays)}회 · 절기 {len(special)}개 자동표시)")
+def offering_tally(a):
+    """주일 헌금 봉투 집계표 (인쇄용 양식) — 헌금 세는 분들이 봉투별 이름·금액을 적어 종류별로 합산하는 표.
+       손으로 적어 합산한 뒤, 그 종류별 합계를 '재정 기록' 카드에 입력하면 출납부·결산서에 자동 반영된다."""
+    date=getattr(a,'date','') or today()
+    r=str(getattr(a,'rows','') or '').strip()
+    nrows=int(r) if (r.isdigit() and 0<int(r)<=60) else 25
+    types=[t for t in (_C.get("헌금종류") or []) if t][:5] or ["십일조","감사","선교","건축","기타"]
+    cols=["번호·이름"]+types+["합계"]
+    d=newdoc()
+    para(d,f"{CHURCH}  주일 헌금 봉투 집계표",20,NAVY,True,AL.CENTER,after=2,font=SANS)
+    para(d,f"날짜: {date}       집계: ____________ (인)       확인: ____________ (인)",11,GRAY,AL.CENTER,after=8,font=SANS)
+    t=d.add_table(rows=nrows+2,cols=len(cols))
+    for j,h in enumerate(cols):
+        ctext(t.rows[0].cells[j],h,10.5,WHITE,True,SANS,AL.CENTER); shade(t.rows[0].cells[j],"1F5C9E")
+    lr=nrows+1
+    ctext(t.rows[lr].cells[0],"합   계",11,MAROON,True,SANS,AL.CENTER); shade(t.rows[lr].cells[0],"EAF0F7")
+    for j in range(1,len(cols)): shade(t.rows[lr].cells[j],"EAF0F7")
+    try: t.rows[0].cells[0].width=Cm(4.2)
+    except Exception: pass
+    tborders(t,"AAAAAA",4)
+    para(d,"※ 봉투별로 이름과 금액을 적고, 세로줄(종류별)로 더해 맨 아래 ‘합계’ 칸에 적으세요.",9.5,GRAY,before=8,after=1,font=SANS)
+    para(d,"   그 종류별 합계를 프로그램 ‘재정 기록(수입/지출)’ 카드에 입력하시면 출납부·결산서에 자동으로 반영됩니다.",9.5,GRAY,after=1,font=SANS)
+    out=os.path.join(CAT("06"),f"[헌금봉투집계표] {date}.docx"); _savedoc(d,out)
+    print(f"✅ 주일 헌금 봉투 집계표: {out}  (인쇄해서 헌금 세실 때 사용 · {nrows}줄)")
+def ask_ai(a):
+    """🤖 AI에게 더 깊이 물어보기 — 주제를 넣으면, 그 주제를 깊이 공부·묵상할 좋은 질문들과
+       ChatGPT·제미나이·클로드 등 무료 AI 여는 링크를 만들어 드립니다(붙여넣기·API키/비용 0)."""
+    topic=(getattr(a,'topic','') or "").strip()
+    if not topic:
+        print("주제나 궁금한 것을 적어 주세요.  예)  --topic 은혜   /   --topic 청지기의 삶   /   --topic 요한복음 3장 16절"); return
+    qs=[
+      f"‘{topic}’의 성경적 의미와 핵심을 초신자도 이해하도록 쉽고 따뜻하게 설명해 주세요.",
+      f"‘{topic}’에 대해 성경은 어디서 무엇을 말합니까? 대표 성구 3~4개와 그 맥락을 알려 주세요.",
+      f"‘{topic}’에 대해 사람들이 흔히 오해하는 점과, 성경이 말하는 바른 이해는 무엇입니까?",
+      f"‘{topic}’을 오늘 우리 삶에 구체적으로 어떻게 적용할 수 있을까요? 실천 3가지를 제안해 주세요.",
+      f"‘{topic}’을 설교나 공과에서 쓸 감동적인 예화·비유를 2~3개 알려 주세요.",
+      f"‘{topic}’에 대한 어려운 질문이나 반론에 어떻게 지혜롭게 답할 수 있을까요?",
+      f"‘{topic}’을 청소년·장년·새신자에게 각각 눈높이에 맞게 전하려면 어떻게 하면 좋을까요?",
+      f"‘{topic}’을 더 깊이 공부하고 싶습니다. 추천 도서나 함께 볼 주제를 알려 주세요."]
+    links=[("ChatGPT","https://chat.openai.com/"),("제미나이 Gemini","https://gemini.google.com/"),
+           ("클로드 Claude","https://claude.ai/"),("뤼튼(한국어)","https://wrtn.ai/")]
+    L=[f"════  ‘{topic}’ — AI에게 더 깊이 물어보기  ════","",
+       "■ 쓰는 법 (무료 · API키 필요 없음)",
+       "  1) 아래 ‘좋은 질문’ 중 하나를 복사합니다.",
+       "  2) 아래 ‘AI 여는 주소’ 중 하나를 브라우저로 열어 로그인합니다.",
+       "  3) 붙여넣고 보내면 AI가 자세히 답해 줍니다. 더 궁금하면 이어서 물어보세요.","",
+       "■ 좋은 질문 (하나씩 물어보세요)"]
+    for i,q in enumerate(qs,1): L.append(f"  {i}. {q}")
+    L += ["","■ AI 여는 주소 (무료)"]+[f"  · {nm} : {u}" for nm,u in links]
+    L += ["","※ AI 답변은 참고용입니다 — 반드시 성경과 대조하시고, 최종 판단·설교는 목사님이 은혜받아 하십시오(환각 주의).",
+          f"   ({CHURCH} · {today()})"]
+    out=os.path.join(CAT("07"),f"[AI 심화질문] {sanit(topic)}_{today()}.txt")
+    open(out,'w',encoding='utf-8').write("\n".join(L)); _openfile(out)
+    print(f"✅ ‘{topic}’ AI 심화질문 {len(qs)}개 + AI 열기 링크 생성: {out}")
+    print("  → 질문 하나 복사 → 아래 AI 열어 붙여넣기(무료).")
+    for nm,u in links: print(f"▶열기|{u}|{nm} 열기")
 def main():
     p=argparse.ArgumentParser(add_help=False); sub=p.add_subparsers(dest="cmd")
     def add(name,fn,*flags):
@@ -4277,6 +4527,12 @@ def main():
     add("open-folder",open_folder,"kind")
     add("song-sheet",song_sheet,"title")
     add("careevent-add",careevent_add,"kind","name","note","amount","action","date","jik","occasion","role")
+    add("ask-ai",ask_ai,"topic")
+    add("offering-tally",offering_tally,"date","rows")
+    add("attend-check",attend_check,"date","names","service")
+    add("long-absent",long_absent,"weeks")
+    add("member-card",member_card,"name")
+    add("sermon-plan",sermon_plan,"year")
     add("careevent-list",careevent_list,"kind")
     add("calendar",calendar_cmd,"year")
     add("birthday",birthday,"days")
