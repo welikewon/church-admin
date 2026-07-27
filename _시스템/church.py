@@ -195,26 +195,52 @@ def _ext_copy(path):
     except Exception: pass
 
 # ───────── 명령: 교인 ─────────
-def member_add(a):
-    if not (a.name or "").strip(): print("⚠ 이름을 입력해 주세요."); return
-    db=load()
-    if find(db,a.name):   # ★이미 등록된 교인이면 조회로 보여줌(등록 & 조회 통합·중복 방지)
-        print(f"ℹ '{a.name}' 님은 이미 등록되어 있어 아래에 정보를 보여드립니다.")
-        print("  (같은 이름의 다른 분을 새로 등록하시려면 이름 뒤에 구분을 붙여 주세요 — 예: 김철수B)")
-        print("─"*34)
-        return member_show(a)
-    db["_seq"]+=1
-    fam=[]   # '이름:관계[:생년월일]' 쌍을 ;로 구분 (교우 등록 시 가족 함께 입력)
-    for item in re.split(r'[;\n]', getattr(a,"family",None) or ""):
+def _parse_family(s):
+    fam=[]   # '이름:관계[:생년월일]' 쌍을 ;로 구분
+    for item in re.split(r'[;\n]', s or ""):
         parts=[p.strip() for p in item.split(":")]
         if not parts or not parts[0]: continue
         fam.append({"이름":parts[0],"관계":(parts[1] if len(parts)>1 else ""),"생년월일":(parts[2] if len(parts)>2 else ""),"직분":"","연락처":""})
-    m={"id":db["_seq"],"이름":a.name,"성별":a.sex or "","생년월일":a.birth or "","연락처":a.tel or "",
-       "주소":a.addr or "","직분":a.role or "","세례":a.baptism or "","세례일":a.baptismdate or "","결혼기념일":a.wedding or "","소속셀":a.cell or "","인도자":a.leader or "",
-       "등록일":a.date or today(),"심방주기":a.cycle or "","가족":fam,"직분이력":([{"날짜":a.date or today(),"직분":a.role}] if a.role else []),
+    return fam
+
+# 교인 확장 필드 매핑 (flag → 저장키) — 등록·수정 공용
+_MEMFLD=[("sex","성별"),("birth","생년월일"),("birthtype","생일양음"),("tel","연락처"),("addr","주소"),
+         ("role","직분"),("cell","소속셀"),("leader","인도자"),
+         ("baptism","세례"),("baptismdate","세례일"),("catechism","학습일"),("infantbaptism","유아세례일"),("confirm","입교일"),
+         ("regpath","등록경로"),("prevchurch","이전교회"),("transferdate","전입일"),
+         ("edu","학력"),("job","직장"),("marital","결혼상태"),("wedding","결혼기념일"),("car","차량"),("cycle","심방주기"),("memo","메모")]
+
+def member_add(a):
+    """교우 등록·수정 & 조회 (하나의 카드) — 새 이름이면 등록, 이미 있으면 입력한 칸만 수정, 이름만 넣으면 조회."""
+    if not (a.name or "").strip(): print("⚠ 이름을 입력해 주세요."); return
+    db=load(); hit=find(db,a.name)
+    fam=_parse_family(getattr(a,"family",None))
+    odate=getattr(a,"officedate",None) or getattr(a,"date",None) or today()
+    if hit:   # ★이미 등록 → 입력한 칸만 갱신(수정)·없으면 조회. 기존 정보 보존(데이터 안전)
+        m=hit[0]; changed=[]
+        for fl,key in _MEMFLD:
+            v=getattr(a,fl,None)
+            if v in (None,""): continue
+            if fl=="role" and (v!=m.get("직분") or getattr(a,"officedate",None)):   # 직분 바뀌거나 임직일 주면 연혁 기록
+                m.setdefault("직분이력",[]).append({"날짜":odate,"직분":v,"비고":""})
+            m[key]=v; changed.append(key)
+        exist={g.get("이름") for g in m.get("가족",[])}
+        newfam=[g for g in fam if g["이름"] not in exist]   # 가족은 이름 중복 없이 추가
+        if newfam: m.setdefault("가족",[]).extend(newfam); changed.append(f"가족+{len(newfam)}명")
+        if changed: save(db); print(f"✅ [{m['이름']}] 정보 갱신: "+", ".join(changed))
+        else: print(f"ℹ '{a.name}' 님은 이미 등록되어 있어 정보를 보여드립니다. (동명이인은 이름 뒤에 구분을 붙이세요 — 예: 김철수B)")
+        print("─"*34); return member_show(a)
+    # 신규 등록
+    db["_seq"]+=1
+    m={"id":db["_seq"],"이름":a.name,"성별":a.sex or "","생년월일":a.birth or "","생일양음":(getattr(a,"birthtype",None) or ""),"연락처":a.tel or "",
+       "주소":a.addr or "","직분":a.role or "","세례":a.baptism or "","세례일":a.baptismdate or "","학습일":(getattr(a,"catechism",None) or ""),"유아세례일":(getattr(a,"infantbaptism",None) or ""),"입교일":(getattr(a,"confirm",None) or ""),
+       "결혼상태":(getattr(a,"marital",None) or ""),"결혼기념일":a.wedding or "","소속셀":a.cell or "","인도자":a.leader or "",
+       "등록경로":(getattr(a,"regpath",None) or ""),"이전교회":(getattr(a,"prevchurch",None) or ""),"전입일":(getattr(a,"transferdate",None) or ""),
+       "학력":(getattr(a,"edu",None) or ""),"직장":(getattr(a,"job",None) or ""),"차량":(getattr(a,"car",None) or ""),
+       "등록일":a.date or today(),"심방주기":a.cycle or "","가족":fam,"직분이력":([{"날짜":odate,"직분":a.role,"비고":""}] if a.role else []),
        "상태":"재적","심방이력":[],"기도제목누적":[],"메모":a.memo or ""}
     db["교인"].append(m); save(db)
-    print(f"✅ 교우 등록: {a.name} (id={m['id']}) · 소속셀 {m['소속셀'] or '-'} · 등록일 {m['등록일']}"+(f" · 가족 {len(fam)}명" if fam else ""))
+    print(f"✅ 교우 등록: {a.name} (id={m['id']}) · 직분 {m['직분'] or '-'} · 소속셀 {m['소속셀'] or '-'} · 등록일 {m['등록일']}"+(f" · 가족 {len(fam)}명" if fam else ""))
 
 def member_list(a):
     db=load(); ms=db["교인"]
@@ -228,11 +254,69 @@ def member_show(a):
     if not hit: print(f"✗ '{a.name}' 없음"); return
     m=hit[0]
     print(f"═══ {m['이름']}  (#{m['id']}) ═══")
-    for k in ["성별","생년월일","연락처","주소","직분","세례","소속셀","인도자","등록일","상태"]:
+    bd=m.get("생년월일","")
+    if bd:
+        ym=m.get("생일양음","")
+        print(f"  생년월일: {bd}"+(f" ({ym})" if ym else ""))
+    for k in ["성별","연락처","주소","직분","소속셀","인도자","학력","직장","결혼상태","차량","등록일","상태"]:
         if m.get(k): print(f"  {k}: {m[k]}")
-    if m["가족"]: print("  가족: "+", ".join(f"{g.get('이름','')}({g.get('관계','')})" for g in m["가족"]))
-    if m["메모"]: print(f"  메모: {m['메모']}")
-    print(f"  심방 {len(m['심방이력'])}회 · 누적 기도제목 {len(m['기도제목누적'])}건")
+    sac=[f"{lbl} {m.get(key)}" for lbl,key in [("유아세례","유아세례일"),("학습","학습일"),("세례","세례일"),("입교","입교일")] if m.get(key)]
+    if not sac and m.get("세례"): sac=[f"세례 {m.get('세례')}"]
+    if sac: print("  성례: "+" · ".join(sac))
+    reg=[x for x in [m.get("등록경로",""), (("이전교회 "+m.get("이전교회","")) if m.get("이전교회") else ""), (("전입일 "+m.get("전입일","")) if m.get("전입일") else "")] if x]
+    if reg: print("  등록: "+" · ".join(reg))
+    oh=m.get("직분이력",[])
+    if len(oh)>1 or (oh and oh[0].get("비고")):
+        print("  직분 연혁: "+" → ".join(f"{(o.get('날짜','') or '')[:4]} {o.get('직분','')}".strip() for o in oh))
+    if m.get("가족"): print("  가족: "+", ".join(f"{g.get('이름','')}({g.get('관계','')})" for g in m["가족"]))
+    if m.get("메모"): print(f"  메모: {m['메모']}")
+    print(f"  심방 {len(m.get('심방이력',[]))}회 · 누적 기도제목 {len(m.get('기도제목누적',[]))}건")
+    print(f"▶실행|member-card|name={m['이름']}|📄 이 교우 목양 카드(인쇄용) 한 장 만들기")
+
+def member_update(a):
+    """교우 상세정보 입력·수정 — 이미 등록된 교인의 정보를 채우거나 고칩니다(입력한 칸만 갱신·나머지 보존)."""
+    if not (getattr(a,"name","") or "").strip(): print("⚠ 교인 이름을 입력해 주세요."); return
+    db=load(); hit=find(db,a.name)
+    if not hit: print(f"✗ '{a.name}' 없음 — 먼저 '교우 등록'에서 등록해 주세요."); return
+    m=hit[0]
+    FLD=[("sex","성별"),("birth","생년월일"),("birthtype","생일양음"),("tel","연락처"),("addr","주소"),
+         ("role","직분"),("cell","소속셀"),("leader","인도자"),
+         ("baptism","세례"),("baptismdate","세례일"),("catechism","학습일"),("infantbaptism","유아세례일"),("confirm","입교일"),
+         ("regpath","등록경로"),("prevchurch","이전교회"),("transferdate","전입일"),
+         ("edu","학력"),("job","직장"),("marital","결혼상태"),("wedding","결혼기념일"),("car","차량"),("memo","메모")]
+    changed=[]
+    for fl,key in FLD:
+        v=getattr(a,fl,None)
+        if v not in (None,""):
+            m[key]=v; changed.append(key)
+    if getattr(a,"role",None):
+        m.setdefault("직분이력",[]).append({"날짜":(getattr(a,"date",None) or today()),"직분":a.role,"비고":"정보수정"})
+    save(db)
+    print(f"✅ [{m['이름']}] 정보 갱신: "+(", ".join(changed) if changed else "변경 없음"))
+    print("─"*34); return member_show(a)
+
+def card_vis(a):
+    """🧹 화면 정리 — 안 쓰는 카드를 대시보드에서 숨기거나 복원합니다(설정에 저장·교인 자료와 무관)."""
+    import json as _j
+    p=os.path.join(BASE,"church_config.json")
+    try: c=_j.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}
+    except Exception: c={}
+    hid=list(c.get("숨긴카드",[]) or [])
+    cmd=(getattr(a,"name","") or "").strip(); act=(getattr(a,"act","") or "").strip()
+    if act=="reset":
+        c["숨긴카드"]=[]
+        _j.dump(c,open(p,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+        print("✅ 숨긴 카드를 모두 복원했습니다. (화면을 새로고침하세요)"); return
+    if not cmd:
+        print(f"■ 숨긴 카드 {len(hid)}개: "+(", ".join(hid) if hid else "(없음)")); return
+    if act=="show": hid=[x for x in hid if x!=cmd]; msg=f"복원: {cmd}"
+    else:
+        if cmd not in hid: hid.append(cmd)
+        msg=f"숨김: {cmd}"
+    c["숨긴카드"]=hid
+    _j.dump(c,open(p,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+    print(f"✅ 카드 {msg} · 현재 숨긴 카드 {len(hid)}개")
+
 def family_add(a):
     """가족 등록 — 교인에게 가족 구성원 추가(관계·생일·직분·연락처)."""
     if not a.name or not a.member: print("⚠ 교인 이름과 가족 이름을 입력해 주세요. (가족은 '교우 등록' 카드에서 함께 입력할 수 있습니다)"); return
@@ -378,9 +462,24 @@ def _visit_briefing(m):
         if v.get('후속'): print(f"       후속: {v['후속']}")
     used=[v.get('말씀') for v in H if v.get('말씀')]
     print(f"  ⚠ 이미 나눈 말씀(중복 주의): {', '.join(used) if used else '없음'}")
+def _visit_hub_buttons(yr, name=None):
+    """심방 센터 바로가기 버튼(대심방 현황·상황별 지침·목양 카드)."""
+    print(f"▶실행|visit-daesim|year={yr}|🏘️ 춘계·추계 대심방(전교인) 현황")
+    print("▶실행|ref-visit||📖 상황별 심방 지침 보기")
+    if name: print(f"▶실행|member-card|name={name}|📄 이 교우 목양 카드(인쇄용) 한 장")
+
 def visit_add(a):
-    db=load(); hit=find(db,a.name)
-    if not hit: print(f"✗ '{a.name}' 없음 — 먼저 '교우 등록'에서 등록해 주세요"); return
+    """심방 센터 — 이름 없이 실행하면 대심방 현황·상황별 지침 바로가기, 이름을 넣으면 그 교우 심방 브리핑·기록."""
+    yr=today()[:4]
+    name=(getattr(a,"name","") or "").strip()
+    if not name:   # ★ 심방 센터(허브) — 이름 없이 실행 시 관련 기능 바로가기
+        print("■ 심방 센터")
+        print("  · 개별 심방(브리핑·기록)은 위 '이름' 칸에 교우 이름을 넣어 실행하세요.")
+        print("  · 아래 버튼으로 대심방 현황과 상황별 심방 지침을 바로 볼 수 있습니다.")
+        print("  ─────────────────────────")
+        _visit_hub_buttons(yr); return
+    db=load(); hit=find(db,name)
+    if not hit: print(f"✗ '{name}' 없음 — 먼저 '교우 등록'에서 등록해 주세요"); return
     m=hit[0]
     _visit_briefing(m)   # ★ 기록 전에 항상 브리핑(지난 말씀·기도제목 반복 방지)
     has=any([(getattr(a,'word','') or '').strip(),(getattr(a,'note','') or '').strip(),
@@ -388,16 +487,17 @@ def visit_add(a):
     if not has:
         print("  ─────────────────────────")
         print("  ※ 브리핑만 보셨습니다. 심방 다녀오신 뒤 '전한 말씀·기도제목·나눈 내용'을 채워 다시 실행하면 기록됩니다.")
-        return
-    prayers=[p.strip() for p in (a.prayer or "").split(";") if p.strip()]
-    v={"날짜":a.date or today(),"심방자":a.by or PASTOR,"구분":a.kind or "정기",
-       "말씀":a.word or "","내용":a.note or "","기도제목":prayers,"후속":a.followup or ""}
-    m["심방이력"].append(v)
-    for p in prayers:
-        if p not in m["기도제목누적"]: m["기도제목누적"].append(p)
-    save(db)
-    print("  ─────────────────────────")
-    print(f"✅ 심방 기록 완료: {m['이름']} · {v['날짜']} · 말씀 '{v['말씀'] or '-'}' · 기도제목 {len(prayers)}건 누적")
+    else:
+        prayers=[p.strip() for p in (a.prayer or "").split(";") if p.strip()]
+        v={"날짜":a.date or today(),"심방자":a.by or PASTOR,"구분":a.kind or "정기",
+           "말씀":a.word or "","내용":a.note or "","기도제목":prayers,"후속":a.followup or ""}
+        m["심방이력"].append(v)
+        for p in prayers:
+            if p not in m["기도제목누적"]: m["기도제목누적"].append(p)
+        save(db)
+        print("  ─────────────────────────")
+        print(f"✅ 심방 기록 완료: {m['이름']} · {v['날짜']} · 말씀 '{v['말씀'] or '-'}' · 기도제목 {len(prayers)}건 누적")
+    _visit_hub_buttons(yr, m["이름"])   # 브리핑/기록 후 공통 바로가기
 
 def visit_daesim(a):
     """🏘️ 춘계·추계 대심방 현황 — 올해 대심방(구분에 '대심방' 포함) 완료 세대와 미심방 세대·진행률(전교인 심방 점검)."""
@@ -3166,7 +3266,7 @@ def menu(a):
                 else: print("  현재 최신 버전입니다.")
             else: print("→ 없는 번호입니다.")
         except Exception as e: print("오류:",e)
-VERSION="2026-07-23 (목양: 주간출석·장기결석자·목양카드 / 설교: 연간계획표·AI심화질문 / 단기선교 상세 / 헌금봉투집계표 / 검색·지난자료 개선 / ★안정화: 심방브리핑·달력인쇄·집회일정·주간브리핑·엑셀관리대장·성경카드 수정)"
+VERSION="2026-07-27 (★교적 확장+카드 병합: ①한 카드로 교우 등록·수정·조회[이름만=조회·필요칸만=등록/수정·데이터 안전]+생일 양/음·직분 연혁·가정식구·전교회·학습/세례/유아세례/입교·학력/직장/결혼/차량·인도자 ②목양 카드를 교우 카드 바로 옆에·병합 정보 모두 반영(직분 연혁 포함) ③조회→'📄 목양 카드' 원클릭 ④심방 3카드→'심방 센터' 하나로[이름없이=대심방 현황·상황별 지침 바로가기, 이름=브리핑+버튼]) / 이전: 설교·단기선교·헌금집계 등"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
@@ -3715,6 +3815,37 @@ def manual(a):
       "처음 한 번: _시스템\\church_config.json 을 메모장으로 열어 우리 교회명·담임명을 넣고 저장.",
       "준비물: 파이썬과 필요한 라이브러리(python-docx·openpyxl·python-pptx)는 배포판에 이미 포함되어 있어 따로 설치하지 않으셔도 됩니다. (한글 .hwp 변환만 한컴오피스가 설치된 PC에서 가능)",
       "만든 문서는 01~09 번호 폴더에 예배유형·종류별로 자동 정리됩니다."]),
+     ("🆕 이번 업데이트로 새로워진 기능 (교적·목양·심방·화면)",[
+      "◆ 교우(성도) 관리가 ‘한 카드’로 통합되었습니다 — ‘교우 등록·수정 & 조회’ 카드 하나로 다 됩니다.",
+      "   · 이름만 넣고 실행 = 그 교우 정보를 조회합니다(가족·심방이력 요약).",
+      "   · 새 이름 + 필요한 칸을 채워 실행 = 등록합니다(모든 칸을 다 채우지 않으셔도 됩니다).",
+      "   · 이미 등록된 교우 + 고칠 칸만 채워 실행 = 그 칸만 고쳐지고 나머지는 그대로 보존됩니다(안전).",
+      "◆ 새로 입력할 수 있는 정보: 생년월일 양력/음력 · 직분 연혁(권찰→집사→권사→안수집사→장로, 임직일과 함께 쌓임) · 가정 식구(관계별: 아내·아들·딸·부모 등) · 전(前) 교회(초신자 등록/타교회 전입·이전 교회·전입일) · 학습·세례·유아세례·입교 · 학력·직장·결혼상태·차량 · 인도자.",
+      "   · 직분이 바뀌면 ‘직분’에 새 직분을, ‘직분 임직·취임일’에 날짜를 넣어 실행하면 연혁으로 쌓입니다.",
+      "◆ 교인 목양 카드(인쇄용 한 장)가 교우 카드 바로 옆에 있습니다 — 위에 입력한 모든 정보(직분 연혁·성례·전교회·학력 등)에 더해 가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석까지 한 장에 담깁니다. 조회 결과의 ‘📄 목양 카드 만들기’ 버튼으로도 바로 만들 수 있습니다. (조회=화면 요약 / 목양 카드=인쇄용 문서)",
+      "◆ ‘심방 센터’ 하나로 통합 — 심방 기록·브리핑, 대심방 현황, 상황별 지침을 한 카드로.",
+      "   · 이름을 비우고 실행 = 심방 센터(대심방 현황·상황별 지침 바로가기 버튼).",
+      "   · 이름만 넣고 실행 = 그 교우의 지난 말씀·기도제목 브리핑(반복 방지) + 현황·지침·목양 카드 버튼.",
+      "   · 심방 다녀와서 ‘전한 말씀·기도제목·나눈 내용’을 채워 실행 = 기록됩니다.",
+      "◆ ‘🧹 화면 정리’ (화면 오른쪽 위 버튼) — 안 쓰는 카드를 숨겨 화면을 깔끔하게. 버튼을 켜면 각 카드에 ‘🙈 숨기기’가 뜨고, 숨긴 카드는 ‘↩️ 복원’으로 언제든 되돌립니다. (설정에 저장되어 업데이트해도 유지되며 교인 자료와는 무관합니다.)",
+      "◆ 바탕화면 아이콘 — ‘★ 바탕화면 아이콘 만들기 (한 번만 더블클릭)’ 파일을 한 번 실행하면 바탕화면에 ‘교회 행정’ 아이콘이 생깁니다. 이후엔 폴더를 열 필요 없이 그 아이콘만 더블클릭하세요."]),
+     ("🧹 화면 정리 — 안 쓰는 카드 숨기기 (자세한 사용법)",[
+      "카드(기능 상자)가 많아 복잡해 보이면, 자주 쓰시는 카드만 남기고 나머지는 숨길 수 있습니다. 완전히 지우는 게 아니라 잠시 ‘숨기는’ 것이라, 언제든 다시 꺼낼 수 있어 100% 안전합니다.",
+      "① 화면 오른쪽 위, ‘업데이트’ 버튼 옆의 「🧹 화면 정리」 버튼을 누릅니다. (정리 모드가 켜집니다)",
+      "② 그러면 모든 카드의 오른쪽 위에 「🙈 숨기기」라는 작은 버튼이 나타납니다.",
+      "③ 안 쓰는 카드의 「🙈 숨기기」를 누르면 그 카드가 목록에서 사라집니다. 원하는 카드마다 반복하세요.",
+      "④ 다 정리하셨으면 오른쪽 위의 「✓ 정리 끝내기」를 누릅니다. 이제 자주 쓰시는 카드만 보이는 깔끔한 화면이 됩니다.",
+      "⑤ 되돌리고 싶으면: 다시 「🧹 화면 정리」를 켜면 숨긴 카드가 흐릿하게 다시 보이고, 그 카드의 「↩️ 복원」을 누르면 되살아납니다. 전부 되돌리려면 아무 카드나 복원해 나가시면 됩니다.",
+      "★ 숨긴 상태는 저장됩니다 — 프로그램을 껐다 켜도, 업데이트를 받아도 그대로 유지됩니다(설정 파일 church_config.json에 기록).",
+      "★ 교인·심방·재정 등 입력하신 자료와는 전혀 관계가 없습니다. 화면에 무엇을 보여줄지만 정리하는 것이라 자료는 절대 바뀌지 않습니다.",
+      "※ 위쪽 검색창은 정리와 상관없이 늘 모든 기능을 찾아 줍니다. 급히 숨긴 기능이 필요하면 검색으로도 쓰실 수 있고, 위 ⑤로 언제든 복원하시면 됩니다."]),
+     ("🖥️ 바탕화면 아이콘 — 한 번에 프로그램 켜기 (자세한 사용법)",[
+      "폴더를 열지 않고 바탕화면에서 바로 프로그램을 켜고 싶으실 때, 바탕화면에 시작 아이콘(교회 건물+십자가 모양)을 만들 수 있습니다.",
+      "① 프로그램 폴더(★○○교회 종합행정시스템…) 안에 있는 「★ 바탕화면 아이콘 만들기 (한 번만 더블클릭)」 파일을 더블클릭합니다.",
+      "② 잠깐 검은 창이 지나간 뒤, 바탕화면에 ‘교회 행정’ 아이콘이 생깁니다.",
+      "③ 이제부터는 폴더를 열 필요 없이, 바탕화면의 그 아이콘만 더블클릭하면 프로그램이 바로 켜집니다.",
+      "※ 이 파일은 처음에 딱 한 번만 실행하시면 됩니다. 아이콘이 안 보이거나 사라졌으면 다시 한 번 실행하세요.",
+      "※ 아이콘 그림이 예전 모양으로 보이면, 바탕화면 빈 곳을 마우스 오른쪽 클릭 → ‘새로 고침’을 한 번 누르시면 새 그림으로 바뀝니다."]),
      ("★ 맨 처음 하실 일 — 우리 교회 이름 넣기 (아주 쉽습니다)",[
       "이 프로그램은 ‘우리 교회 이름’과 ‘담임 목사님 성함’을 한 번만 넣어두면, 이후 만드는 모든 문서·주보·증명서·축하 문자에 그 이름이 자동으로 들어갑니다.",
       "◆ 가장 쉬운 방법 — 이대로만 하세요:",
@@ -4395,7 +4526,16 @@ def member_card(a):
     para(d," / ".join([x for x in [m.get('직분'),m.get('소속셀'),m.get('연락처')] if x]),11,GRAY,AL.CENTER,after=8,font=SANS); hr(d,"1F5C9E",12)
     def sec(t): para(d,t,13,RGBColor(0x1F,0x5C,0x9E),True,before=9,after=3,font=SANS)
     sec("■ 기본 정보")
-    for k,v in [("생년월일",m.get("생년월일","")),("결혼기념일",m.get("결혼기념일","")),("주소",m.get("주소","")),("세례",m.get("세례","")),("등록일",m.get("등록일","")),("최근 출석",last or "기록 없음")]:
+    _bd=m.get("생년월일","")
+    if _bd and m.get("생일양음"): _bd=f"{_bd} ({m.get('생일양음')})"
+    _sac=" · ".join([f"{lbl} {m.get(key)}" for lbl,key in [("유아세례","유아세례일"),("학습","학습일"),("세례","세례일"),("입교","입교일")] if m.get(key)]) or m.get("세례","")
+    _reg=" · ".join([x for x in [m.get("등록경로",""), (("이전교회 "+m.get("이전교회","")) if m.get("이전교회") else ""), (("전입일 "+m.get("전입일","")) if m.get("전입일") else "")] if x])
+    _oh=m.get("직분이력",[])
+    _ohl=(" → ".join(f"{(o.get('날짜','') or '')[:4]} {o.get('직분','')}".strip() for o in _oh)) if len(_oh)>1 else ""
+    for k,v in [("생년월일",_bd),("성별",m.get("성별","")),("연락처",m.get("연락처","")),("주소",m.get("주소","")),
+                ("직분",m.get("직분","")),("직분 연혁",_ohl),("소속셀",m.get("소속셀","")),("인도자",m.get("인도자","")),
+                ("결혼상태",m.get("결혼상태","")),("결혼기념일",m.get("결혼기념일","")),("학력",m.get("학력","")),("직장",m.get("직장","")),("차량",m.get("차량","")),
+                ("성례",_sac),("등록",_reg or m.get("등록일","")),("최근 출석",last or "기록 없음")]:
         if v: para(d,f"  · {k}: {v}",11,after=1)
     if fam:
         sec("■ 가족")
@@ -4517,7 +4657,9 @@ def main():
         for fl in flags: sp.add_argument("--"+fl, dest=fl)
         sp.set_defaults(func=fn); return sp
     add("help",helpcmd)
-    add("member-add",member_add,"name","sex","birth","tel","addr","role","cell","leader","baptism","baptismdate","wedding","cycle","memo","date","family")
+    add("member-add",member_add,"name","sex","birth","birthtype","tel","addr","role","officedate","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","cycle","memo","date","family")
+    add("member-update",member_update,"name","sex","birth","birthtype","tel","addr","role","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","memo","date")
+    add("card-vis",card_vis,"name","act")
     add("office-add",office_add,"name","role","memo","date")
     add("office-list",office_list,"name")
     ml=add("member-list",member_list,"cell")

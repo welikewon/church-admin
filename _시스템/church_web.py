@@ -24,18 +24,15 @@ C=cfg()
 
 ACTIONS=[
  # group, cmd, title, icon, fields[(name,label,placeholder,required)]
- ("목양","member-add","교우 등록 & 조회","🙌",[("name","이름","",1),("role","직분","",0),("cell","소속셀","",0),("tel","연락처","",0),("addr","주소","",0),("birth","생년월일","",0),("family","가족(이름:관계 ; 로 구분 · 예: 김영희:배우자; 홍철수:자녀)","",0)],"이름만 넣고 실행하면 → 이미 등록된 교인이면 정보·가족을 조회해 보여줍니다. 새 이름이면 → 나머지 칸(직분·연락처·가족 등)을 채워 실행해 등록합니다. 한 카드로 등록과 조회를 다 합니다."),
+ ("목양","member-add","교우 등록·수정 & 조회 (한 카드로)","🙌",[("name","이름","",1),("role","직분 (권찰/집사/권사/안수집사/장로 등)","",0),("officedate","직분 임직·취임일 (직분 바뀔 때만)","",0),("cell","소속셀","",0),("leader","인도자","",0),("tel","연락처","",0),("addr","주소","",0),("birth","생년월일","",0),("birthtype","생일 양력/음력 (양력/음력)","",0),("marital","결혼 상태 (미혼/기혼/사별/이혼)","",0),("wedding","결혼기념일","",0),("edu","학력","",0),("job","직장","",0),("car","차량","",0),("baptismdate","세례일","",0),("catechism","학습일","",0),("infantbaptism","유아세례일","",0),("confirm","입교일","",0),("regpath","등록 경로 (초신자 등록/타교회 전입)","",0),("prevchurch","이전 교회","",0),("transferdate","전입일","",0),("family","가정 식구 (이름:관계 ; 로 구분 · 예: 김영희:아내; 홍길동:아들; 홍부모:부모)","",0),("memo","메모","",0)],"한 카드로 등록·수정·조회를 다 합니다. ▸이름만 넣고 실행 = 조회. ▸새 이름 + 필요한 칸 = 등록(모든 칸을 다 채울 필요 없습니다). ▸이미 등록된 교우 + 고칠 칸만 = 그 칸만 수정되고 나머지는 그대로 보존(안전). ▸직분을 새로 넣으면 '직분 연혁'으로 쌓이고 임직일을 함께 넣으면 그 날짜로 기록됩니다."),
+ ("목양","member-card","교인 목양 카드 (인쇄용 한 장) 🪪","🪪",[("name","교인 이름","",1)],"바로 위 '교우 등록·수정 & 조회'에 담긴 모든 정보(생일 양/음·직분 연혁·성례·전교회·학력·직장 등)와 가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석까지 — 한 사람의 모든 것을 인쇄용 문서 한 장으로 만듭니다. 심방 전 파악용. ▸이름만 넣어 '조회'한 결과의 '📄 목양 카드 만들기' 버튼으로도 바로 만들 수 있습니다. (조회=화면 요약 / 이 카드=인쇄용 문서)"),
  ("목양","member-transfer","교적 이동(전입·전출·이명) + 대장","↔️",[("kind","종류(전입/전출/이명)","전출",0),("name","이름 (비우면 대장만 봅니다)","",0),("date","날짜","",0),("church","상대 교회","",0),("memo","사유","",0)],"이름을 넣으면 전입·전출·이명을 기록하고 교인 상태를 갱신하며, 항상 '교적 이동 대장'을 함께 출력합니다. 이름을 비우면 대장만 봅니다. 이명증서는 '증명서 발급'에서."),
- ("목양","visit-add","심방 기록 & 브리핑","📝",[("name","이름","",1),("kind","구분(정기/춘계대심방/추계대심방/입원/새가족/구역)","정기",0),("word","전한 말씀(다녀와서 기록)","",0),("prayer","기도제목(;로 구분)","",0),("note","나눈 내용","",0),("followup","후속","",0)],"이름만 넣고 실행하면 → 지난 말씀·기도제목 브리핑(반복 방지). 심방 다녀와서 '전한 말씀·기도제목·나눈 내용'을 채워 실행하면 → 기록됩니다. 한 카드로 심방 전·후를 다 챙깁니다."),
- ("목양","visit-daesim","춘계·추계 대심방 현황","🏘️",[("year","연도","2026",0)],"올해 대심방(전교인 심방)의 완료·미완료 세대와 진행률을 한 장으로 — 대심방 기간에 빠짐없이 챙기게."),
- ("목양","ref-visit","심방 지침(상황별) 📖","🧭",[]),
+ ("목양","visit-add","심방 센터 (브리핑·기록·현황·지침)","📝",[("name","이름 (비우면 심방 센터: 현황·지침 바로가기)","",0),("kind","구분(정기/춘계대심방/추계대심방/입원/새가족/구역)","정기",0),("word","전한 말씀(다녀와서 기록)","",0),("prayer","기도제목(;로 구분)","",0),("note","나눈 내용","",0),("followup","후속","",0)],"한 카드로 심방의 모든 것을 챙깁니다. ▸이름을 비우고 실행 = 심방 센터(대심방 현황·상황별 지침 바로가기 버튼). ▸이름만 넣고 실행 = 그 교우의 지난 말씀·기도제목 브리핑(반복 방지) + 대심방 현황·지침·목양 카드 버튼. ▸심방 다녀와서 '전한 말씀·기도제목·나눈 내용'을 채워 실행 = 기록."),
  ("목양","newfamily-add","새가족 등록","🌱",[("name","이름","",1),("tel","연락처","",0),("leader","인도자","",0),("cell","소속셀","",0)]),
  ("목양","newfamily-board","새가족 정착 현황","📊",[]),
  ("목양","care","돌봄 필요 성도","💗",[("days","기준일수","90",0)]),
  ("목양","attend-check","주간 출석 체크 ✅","✅",[("names","참석자 이름 (;로 구분 · 비우면 현황보기)","",0),("date","날짜(비우면 오늘)","",0),("service","예배","주일예배",0)],"매주 예배 참석자 이름을 ;로 구분해 넣으면 기록됩니다. 몇 주 쌓이면 '장기결석자 찾기'가 오래 안 나오신 분을 자동으로 찾아 드립니다."),
- ("목양","long-absent","장기결석자 찾기 (잃은 양) 🔍","🔍",[("weeks","기준 주수(기본 4주)","4",0)],"출석 기록을 바탕으로 N주 이상 예배에 안 나오신 성도를 자동으로 찾아 명단·연락처로 만들어 드립니다. 심방·안부 연락 대상을 놓치지 마세요."),
- ("목양","member-card","교인 목양 카드 (한 장 요약) 🪪","🪪",[("name","교인 이름","",1)],"한 성도의 모든 것(정보·가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석)을 한 장으로 정리합니다. 심방 가기 전에 이 카드로 그 성도를 한눈에 파악하세요."),
- ("목양","weekly-brief","주간 목회 브리핑","🗞️",[]),
+ ("목양","long-absent","장기결석자 찾기 (잃은 양) 🔍","🔍",[("weeks","기준 주수(기본 4주)","4",0)],"출석 기록을 바탕으로 N주 이상 예배에 안 나오신 성도를 자동으로 찾아 명단·연락처로 만들어 드립니다. 심방·안부 연락 대상을 놓치지 마세요."), ("목양","weekly-brief","주간 목회 브리핑","🗞️",[]),
  ("목양","birthday","🎂 생일·결혼기념일 축하","🎂",[("days","며칠 이내를 볼까요? (오늘만 보려면 0)","7",0)],"다가오는 생일·결혼기념일을 미리 확인하고, 당일에 보낼 축하 카톡을 함께 만들어 드립니다('오늘'로 표시). 100가지 문구가 매년 다르게 자동 선택되고, 지난 축하도 보여드려 겹치지 않아요."),
  ("목양","careevent-add","축하·위로 문자 (상황별·경조사 통합) 🎉","🎉",[("kind","상황(취업·이사·합격·군입대·출산… / 경조사: 결혼·장례·출생·회갑·입원)","",1),("name","대상 이름","",1),("jik","호칭·직분(형제/집사 등)","",0),("date","날짜(결혼→기념일 자동연동)","",0),("amount","경조금(경조사만·기록됨)","",0),("note","내용·메모(경조사 기록용)","",0)],"상황이나 사건을 넣으면 골라 쓸 축하·위로 카톡 문구를 만들어 드립니다. 취업·이사·합격 등 상황별은 3문구, 결혼·장례·출생 등 경조사는 문자+경조금 기록·심방 연동까지. 생일·결혼기념일은 옆의 '생일·결혼기념일 축하' 카드가 자동으로 챙깁니다."),
  ("목양","cell-worship","구역·속회 예배 순서지","🏠",[("title","제목","구역예배",0),("text","본문","",0),("date","날짜","",0),("leader","인도(구역장)","",0)],"구역·속회 예배 순서 + 나눔 질문 + 기도제목 기입란. 구역장이 인도용으로 출력합니다."),
@@ -462,6 +459,7 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
       <div class="date" id="today"></div>
       <div class="search"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="search" placeholder="교인·설교·재정·서식 검색"><span class="kbd">Ctrl K</span></div>
       <button class="upd" onclick="updateApp()" title="최신 버전으로 안전 업데이트 (자료 보존)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10l4 4 4-4M5 21h14"/></svg>업데이트</button>
+      <button class="upd" onclick="toggleEdit()" id="tidybtn" title="안 쓰는 카드를 숨겨 화면을 깔끔하게 — 각 카드의 숨기기/복원 버튼으로. 설정에 저장되고 자료와는 무관합니다.">🧹 화면 정리</button>
       <div class="themewrap">
         <div class="icobtn theme-tgl" onclick="toggleThemePanel(event)" title="테마·색상·계절 배경"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7"/></svg></div>
         <div class="themepanel" id="themepanel" onclick="event.stopPropagation()">
@@ -575,6 +573,9 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
 <button class="home" id="homebtn" onclick="goHome()">⌂ 전체 메뉴</button>
 <script>
 var A=__ACTIONS__;
+var HIDDEN=__HIDDEN__;var editMode=false;
+function toggleEdit(){editMode=!editMode;var b=document.getElementById('tidybtn');if(b)b.textContent=editMode?'✓ 정리 끝내기':'🧹 화면 정리';render((document.getElementById('q')||{}).value||'');}
+function cardVis(cmd,hide){fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'card-vis',args:{name:cmd,act:hide?'hide':'show'}})}).then(function(){if(hide){if(HIDDEN.indexOf(cmd)<0)HIDDEN.push(cmd);}else{HIDDEN=HIDDEN.filter(function(x){return x!==cmd;});}render((document.getElementById('q')||{}).value||'');});}
 var NETERR='⚠ 프로그램 서버에 연결할 수 없습니다.'+String.fromCharCode(10)+'★ 교회행정 시작 파일을 다시 더블클릭(실행)한 뒤,'+String.fromCharCode(10)+'이 창을 새로고침(F5)하고 다시 눌러주세요.';
 function isNet(e){var s=String(e);return s.indexOf('fetch')>=0||s.indexOf('Failed')>=0||s.indexOf('NetworkError')>=0;}
 var COLORS={"목양":"#10b981","예배·설교":"#f43f5e","성례":"#0ea5e9","성경자료":"#6366f1","목회 참고자료":"#8b5cf6","다음세대(주일학교)":"#ec4899","영성":"#7c3aed","찬양":"#8b5cf6","영상·홍보":"#c026d3","사역":"#f59e0b","전도":"#16a34a","선교":"#0d9488","재정":"#3b82f6","행정서식":"#0891b2","출력·파일":"#14b8a6","시스템":"#64748b"};
@@ -595,7 +596,7 @@ function navGo(i){var s=document.getElementById('search');if(s)s.value='';render
 function render(q){
  app.innerHTML='';q=(q||'').toLowerCase();
  GROUPS.forEach(function(g){
-  var items=A.filter(function(a){return a[0]===g && (!q || (a[1]+a[2]+(a[5]||'')+JSON.stringify(a[4]||'')).toLowerCase().indexOf(q)>=0);});
+  var items=A.filter(function(a){return a[0]===g && (editMode||HIDDEN.indexOf(a[1])<0) && (!q || (a[1]+a[2]+(a[5]||'')+JSON.stringify(a[4]||'')).toLowerCase().indexOf(q)>=0);});
   if(!items.length)return;
   var col=COLORS[g]||'#6366f1';var gi=GROUPS.indexOf(g);
   var h=document.createElement('div');h.className='sec-h';h.id='sec'+gi;
@@ -614,7 +615,9 @@ function render(q){
    var d=document.createElement('div');d.className=(feat?'card feat':'card')+(insub?' subc':'');
    if(insub)d.style.setProperty('--sc',SUB.color);
    d.innerHTML=(feat?'<span class="badge">추천</span>':'')+'<div class="ci" style="color:'+cc+';background:color-mix(in srgb,'+cc+' 15%,transparent)">'+a[3]+'</div><h4>'+esc(a[2])+'</h4><p>'+esc(a[5]||a[1])+'</p><span class="go">→</span>';
-   d.onclick=function(){openM(a);};grid.appendChild(d);
+   d.onclick=function(){openM(a);};
+   if(editMode){var hd=(HIDDEN.indexOf(a[1])>=0);if(hd)d.style.opacity='0.45';d.style.position='relative';var vb=document.createElement('button');vb.className='fileopen';vb.style.cssText='position:absolute;top:6px;right:6px;padding:2px 8px;font-size:12px;z-index:2';vb.textContent=hd?'↩️ 복원':'🙈 숨기기';vb.onclick=function(e){e.stopPropagation();cardVis(a[1],!hd);};d.appendChild(vb);}
+   grid.appendChild(d);
   });
   app.appendChild(grid);
  });
@@ -829,9 +832,12 @@ function findPath(line){var low=line.toLowerCase();var exts=['.docx','.hwp','.hw
  if(start<0)return null;return line.substring(start,end);}
 function parentDir(p){var i=Math.max(p.lastIndexOf('/'),p.lastIndexOf(String.fromCharCode(92)));return i>0?p.substring(0,i):p;}
 function addOpen(o,path,label,icon,tail){var b=document.createElement('button');b.className='fileopen';b.textContent=(icon||'📂')+' '+(label||baseName(path))+(tail||' — 눌러서 열기');b.onclick=function(){openPath(path,b);};o.appendChild(b);}
+function addRun(o,cmd,args,label){var b=document.createElement('button');b.className='fileopen';b.textContent=label||cmd;b.onclick=function(){runQuick(cmd,args,label||cmd);};o.appendChild(b);}
 function renderOut(o,t){o.innerHTML='';(t||'완료').split(String.fromCharCode(10)).forEach(function(line){
   var m=line.match(/^▶열기[|](.+?)[|](.+)$/);
   if(m){addOpen(o,m[1],m[2],'📂','');return;}
+  var rc=line.match(/^▶실행[|](.+?)[|](.*?)[|](.+)$/);
+  if(rc){var ar={};rc[2].split(',').forEach(function(kv){var kp=kv.split('=');if(kp[0])ar[kp[0].trim()]=(kp.slice(1).join('=')||'').trim();});addRun(o,rc[1],ar,rc[3]);return;}
   var d=document.createElement('div');d.textContent=line;o.appendChild(d);
   var fp=findPath(line);
   if(fp){addOpen(o,fp,null,'📂',' — 이 문서 열기');addOpen(o,parentDir(fp),'이 파일이 있는 폴더','🗂️',' 열기');}
@@ -1006,7 +1012,8 @@ class H(BaseHTTPRequestHandler):
             self._send(js,"application/json; charset=utf-8"); return
         page=(PAGE.replace("__CHURCH__",C.get("교회명","○○교회")).replace("__PASTOR__",C.get("담임","담임 목사"))
               .replace("__VERSION__",_engine_ver())
-              .replace("__ACTIONS__",json.dumps(ACTIONS,ensure_ascii=False)))
+              .replace("__ACTIONS__",json.dumps(ACTIONS,ensure_ascii=False))
+              .replace("__HIDDEN__",json.dumps((cfg() or {}).get("숨긴카드",[]),ensure_ascii=False)))
         self._send(page)
     def do_POST(self):
         if self.path=="/shutdown":
