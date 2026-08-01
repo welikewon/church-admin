@@ -4006,6 +4006,34 @@ def _backup_nudge():
         pass
 
 
+def _menu_error(choice, exc):
+    """번호 메뉴에서 문제가 생겼을 때 — 영문 대신 한국어 안내. 원문은 _오류기록 파일로."""
+    import traceback, datetime as _dt
+    t=repr(exc)
+    if any(k in t for k in ("PermissionError","WinError 32","Access is denied")):
+        why="만들려는 파일이 다른 프로그램에서 열려 있는 것 같습니다."; how="한글·워드·엑셀에서 그 문서를 닫고 다시 해보세요."
+    elif any(k in t for k in ("URLError","urlopen","getaddrinfo","timed out")):
+        why="인터넷 연결이 잠시 끊긴 것 같습니다."; how="인터넷을 확인하신 뒤 다시 해보세요."
+    elif "FileNotFoundError" in t:
+        why="필요한 파일을 찾지 못했습니다."; how="파일 이름과 위치가 맞는지 확인해 주세요."
+    else:
+        why="이 작업을 끝내지 못했습니다."; how="프로그램을 껐다 다시 켜고 한 번만 더 해보세요."
+    print(f"\n  ⚠ {why}")
+    print(f"    · {how}")
+    print( "    🔒 입력하신 교인·심방·재정 자료는 안전합니다.")
+    try:
+        d=os.path.join(BASE,"_오류기록"); os.makedirs(d,exist_ok=True)
+        stamp=_dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        p=os.path.join(d,f"오류_{stamp}.txt")
+        open(p,'w',encoding='utf-8').write(
+            f"[오류 기록]\n일시: {stamp}\n메뉴 번호: {choice}\n\n"
+            "※ 이 파일을 담당자에게 보내주시면 다음 업데이트에서 고쳐 드립니다.\n"
+            "   교인·심방·재정 자료는 이 파일에 들어있지 않습니다.\n\n"
+            "─── 기술적인 내용 ───\n"+"".join(traceback.format_exception(type(exc),exc,exc.__traceback__)))
+        print(f"    ※ 계속 같은 일이 생기면 이 파일을 담당자에게 보내주세요:\n      {p}")
+    except Exception: pass
+
+
 def menu(a):
     """간편 메뉴 — 번호만 누르면 되는 대화형(명령어 몰라도 사용). 시작.bat로 실행."""
     import types
@@ -4065,8 +4093,11 @@ def menu(a):
                 if upd: update(NS(file=upd[1])); print("  ✅ 업데이트 완료! 교인·설교 등 자료는 영구 보존되었습니다. 프로그램을 다시 실행하세요.")
                 else: print("  현재 최신 버전입니다.")
             else: print("→ 없는 번호입니다.")
-        except Exception as e: print("오류:",e)
-VERSION="2026-07-31 (★엑셀 그대로 가져오기: ①교인 명단 일괄등록[열이름 자동인식·이름칸만 있으면 됨·전화번호 앞 0 복원·미리보기 후 등록·등록 직전 자동백업·기존 정보 절대 덮어쓰지 않음] ②재정 엑셀 가져오기[거래장부/월별결산표/주간헌금표 3형태 자동인식·합계소계 줄 자동제외·₩·원 표기 인식·중복 자동 건너뜀] ③★검수표 자동생성[검수요약·월별대조·항목별대조·옮기지 않은 줄까지 엑셀로 — 재정은 틀리면 안 되므로] ④백업 안 하신 지 오래되면 메뉴에서 알려드림·USB 폴더 지정 시 자동 이중저장 ⑤새 업데이트 나오면 켤 때 알림 띠+소리 ⑥목사님용 안내문 3종 동봉[처음 시작하기·문제 해결·개인정보 동의서 서식]) / 이전: 교적 확장·목양카드·심방센터·설교·단기선교·헌금집계 등"
+        except Exception as e:
+            # ★영문 오류를 그대로 내보이지 않는다 — 목사님이 당황하신다.
+            #   무엇을 하시면 되는지만 한국어로 알려 드리고, 원문은 파일로 남긴다.
+            _menu_error(c, e)
+VERSION="2026-08-01 (★목사님 편의 2가지: ①바탕화면 아이콘이 저절로 생깁니다 — 압축 풀고 시작 파일 한 번만 누르시면 끝, 「아이콘 만들기」를 따로 실행하지 않으셔도 됩니다. 교회 이름을 넣으시면 아이콘 이름도 바로 따라 바뀝니다 ②영문 오류를 화면에서 없앴습니다 — 문제가 생겨도 무엇 때문인지·무엇을 하시면 되는지 한국어로 알려드리고 자료는 안전하다고 분명히 말씀드립니다. 기술적인 내용은 _오류기록 파일로 남겨 담당자에게 보내실 수 있습니다[인터넷 끊김·문서 열려있음·파일 누락·저장공간 부족 등 상황별]. 화면·번호메뉴 양쪽 적용 / 안내문 문의처 문구 정정) / 이전(07-31): 교인 명단 일괄등록·재정 엑셀 가져오기·검수표 자동생성·백업 알림·USB 이중저장"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"

@@ -1006,6 +1006,141 @@ def _beep(ok=True):
         import winsound
         winsound.MessageBeep(winsound.MB_OK if ok else winsound.MB_ICONHAND)
     except Exception: pass
+def _ensure_desktop_icon():
+    """★바탕화면 아이콘을 알아서 만들어 드린다(켤 때마다 점검, 필요할 때만 작업).
+
+       왜 자동인가 — 예전에는 목사님이 「바탕화면 아이콘 만들기」 파일을 따로 찾아
+       한 번 더 실행하셔야 했다. 시작 파일과 이름이 비슷해 헷갈리고, 그 단계를 놓치면
+       매번 폴더를 뒤져 들어가셔야 한다. 압축 풀고 한 번 누르면 끝나야 한다.
+
+       교회 이름을 나중에 넣으시면 아이콘 이름도 따라 바꾼다(옛 아이콘은 지운다).
+       실패해도 프로그램은 정상 실행되어야 하므로 모든 예외를 조용히 삼킨다."""
+    if os.name != "nt":
+        return
+    root = os.path.dirname(BASE)                     # 설치 폴더(_시스템의 상위)
+    target = os.path.join(root, "★ 교회행정 시작 (여기를 더블클릭).bat")
+    if not os.path.exists(target):
+        return                                       # 시작 파일이 없으면 만들 이유가 없다
+    c = cfg()
+    nm = str(c.get("교회명") or "").strip()
+    if not nm or nm in ("○○교회", "OO교회", "교회"):
+        nm = "교회 종합행정"                          # 아직 교회 이름을 안 넣으신 단계
+        want = f"{nm}.lnk"
+    else:
+        want = f"{nm} 행정.lnk"
+    prev = str(c.get("바탕화면아이콘") or "").strip()
+
+    try:
+        desktop = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+             "[Environment]::GetFolderPath('Desktop')"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20).stdout.strip()
+    except Exception:
+        return
+    if not desktop or not os.path.isdir(desktop):
+        return
+
+    if prev == want and os.path.exists(os.path.join(desktop, want)):
+        return                                       # 이미 있고 이름도 맞다 — 할 일 없음
+
+    ico = os.path.join(BASE, "_교회행정아이콘.ico")
+    env = dict(os.environ)
+    env.update({"CI_DESK": desktop, "CI_WANT": want, "CI_TGT": target,
+                "CI_DIR": root, "CI_ICO": ico if os.path.exists(ico) else "",
+                "CI_PREV": (os.path.join(desktop, prev) if prev and prev != want else "")})
+    ps = (
+        "$p=$env:CI_PREV; if($p -and (Test-Path $p)){Remove-Item $p -Force -ErrorAction SilentlyContinue}; "
+        "$w=New-Object -ComObject WScript.Shell; "
+        "$s=$w.CreateShortcut((Join-Path $env:CI_DESK $env:CI_WANT)); "
+        "$s.TargetPath=$env:CI_TGT; $s.WorkingDirectory=$env:CI_DIR; "
+        "if($env:CI_ICO -and (Test-Path $env:CI_ICO)){$s.IconLocation=$env:CI_ICO+',0'}; "
+        "$s.Description='교회 종합행정시스템 - 여기를 눌러 시작'; $s.Save()")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-Command", ps], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=40, env=env)
+        if r.returncode != 0 or not os.path.exists(os.path.join(desktop, want)):
+            return
+    except Exception:
+        return
+
+    try:                                             # 만든 이름을 기억해 둔다(다음에 이름이 바뀌면 교체)
+        p = os.path.join(BASE, "church_config.json")
+        cur = json.load(open(p, encoding="utf-8")) if os.path.exists(p) else {}
+        cur["바탕화면아이콘"] = want
+        json.dump(cur, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    print(f"  🖥  바탕화면에 「{want[:-4]}」 아이콘을 만들어 두었습니다 — 다음부터는 그것만 누르세요.")
+
+
+def _save_error_log(cmd, detail):
+    """영문 오류 원문을 화면 대신 파일로 남긴다. 목사님이 필요하실 때만 담당자에게 보내시면 된다.
+       (파일로 남기는 데 실패해도 안내는 떠야 하므로 조용히 넘어간다)"""
+    try:
+        import datetime as _dt
+        d=os.path.join(BASE,"_오류기록"); os.makedirs(d,exist_ok=True)
+        stamp=_dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        p=os.path.join(d,f"오류_{stamp}.txt")
+        open(p,'w',encoding='utf-8').write(
+            f"[오류 기록]\n일시: {stamp}\n기능: {cmd}\n\n"
+            "※ 이 파일을 프로그램을 보내주신 담당자에게 카톡·메일로 전달해 주시면\n"
+            "   원인을 찾아 다음 업데이트에서 고쳐 드립니다.\n"
+            "   교인·심방·재정 자료는 이 파일에 들어있지 않습니다.\n\n"
+            "─── 아래는 기술적인 내용입니다 ───\n"+str(detail))
+        return p
+    except Exception:
+        return None
+
+
+def _friendly_error(cmd, detail):
+    """★목사님께 영문 오류를 보여드리지 않는다.
+       Traceback·ModuleNotFoundError 같은 영문 덩어리는 '내가 뭘 잘못했나' 하는 당황을 부른다.
+       원인을 짐작해 한국어로 안내하고, 무엇을 하시면 되는지까지 알려 드린다.
+       기술적인 내용은 _오류기록 폴더의 파일로 남겨 담당자에게 전달하실 수 있게 한다."""
+    t=str(detail)
+    if any(k in t for k in ("URLError","urlopen error","getaddrinfo","TimeoutError",
+                            "timed out","ConnectionError","SSLError","HTTPError")):
+        why="인터넷 연결이 잠시 끊겼거나 느린 것 같습니다."
+        how=["인터넷이 되는지 확인하신 뒤 다시 한 번 눌러 주세요.",
+             "교회 와이파이가 불안정하면 잠시 뒤 다시 시도해 보세요."]
+    elif any(k in t for k in ("PermissionError","WinError 32","Access is denied","때문에 액세스할 수 없습니다")):
+        why="지금 만들려는 파일이 다른 프로그램에서 열려 있는 것 같습니다."
+        how=["한글·워드·엑셀에서 같은 이름의 문서가 열려 있으면 닫아 주세요.",
+             "닫으신 뒤 다시 한 번 눌러 주세요."]
+    elif any(k in t for k in ("ModuleNotFoundError","ImportError","DLL load failed")):
+        why="프로그램 파일 일부가 빠졌거나 손상된 것 같습니다."
+        how=["프로그램을 껐다가 다시 켜 보세요.",
+             "그래도 안 되면 받으신 압축파일(zip)을 새 폴더에 다시 풀어 사용해 주세요.",
+             "※ 교인·심방·재정 자료는 그대로 있습니다(따로 보관됩니다)."]
+    elif any(k in t for k in ("No space left","WinError 112","디스크 공간")):
+        why="컴퓨터 저장 공간이 부족한 것 같습니다."
+        how=["필요 없는 파일을 지우거나 휴지통을 비우신 뒤 다시 해보세요."]
+    elif "FileNotFoundError" in t or "WinError 2" in t:
+        why="필요한 파일을 찾지 못했습니다."
+        how=["파일 이름·위치가 맞는지 확인해 주세요.",
+             "엑셀 파일을 넣으실 때는 프로그램 폴더에 두시면 파일 이름만 넣으셔도 됩니다."]
+    elif "MemoryError" in t:
+        why="한 번에 처리하기에 자료가 너무 큰 것 같습니다."
+        how=["기간이나 범위를 나누어 다시 시도해 보세요."]
+    elif "시간이 너무 오래" in t:
+        why="시간이 오래 걸려 중단했습니다."
+        how=["자료가 많으면 시간이 걸립니다. 잠시 뒤 다시 해보세요."]
+    else:
+        why="이 작업을 끝내지 못했습니다."
+        how=["프로그램을 껐다 다시 켜고 한 번만 더 해보세요.",
+             "그래도 안 되면 「★ 문제 해결 안내」 파일을 열어보세요."]
+    log=_save_error_log(cmd, detail)
+    L=["⚠ "+why,""]
+    L+= ["  · "+h for h in how]
+    L+= ["","  🔒 입력하신 교인·심방·재정 자료는 안전합니다. 그대로 있습니다."]
+    if log:
+        L+= ["","  ※ 계속 같은 일이 생기면 아래 파일을 담당자에게 보내주세요.",
+             "     "+log]
+    return "\n".join(L)
+
+
 def run_cmd(cmd, args):
     argv=[PYEXE, CHURCH_PY, cmd]
     for k,v in args.items(): argv+= ["--"+k, str(v)]
@@ -1020,10 +1155,22 @@ def run_cmd(cmd, args):
                 except Exception: pass
             else: shown.append(ln)
         _beep(r.returncode==0)
-        return "\n".join(shown)+(("\n[오류]\n"+r.stderr) if r.returncode!=0 and r.stderr else "")
+        if cmd=="setup" and r.returncode==0:
+            # 교회 이름을 넣으셨으면 바탕화면 아이콘 이름도 바로 따라 바꾼다
+            # (다음에 켜실 때까지 '○○교회 행정'으로 남아 있으면 안 된다)
+            threading.Thread(target=_ensure_desktop_icon, daemon=True).start()
+        body="\n".join(shown).rstrip()
+        if r.returncode!=0:
+            # ★영문 오류는 화면에 절대 붙이지 않는다(목사님이 당황하신다). 한국어 안내로 바꾼다.
+            msg=_friendly_error(cmd, r.stderr or f"returncode={r.returncode}")
+            return (body+"\n\n"+msg) if body else msg
+        return body
+    except subprocess.TimeoutExpired:
+        _beep(False)
+        return _friendly_error(cmd, "시간이 너무 오래 걸려 중단했습니다(timeout)")
     except Exception as e:
         _beep(False)
-        return f"실행 오류: {e}"
+        return _friendly_error(cmd, repr(e))
 
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
@@ -1192,6 +1339,8 @@ def main():
             import time as _t; _t.sleep(1.0)
     if httpd is None:
         print("포트를 열 수 없습니다. 브라우저만 엽니다..."); webbrowser.open(url); return
+    # 바탕화면 아이콘은 뒤에서 조용히 챙긴다 — 아이콘 만드느라 프로그램이 늦게 뜨면 안 된다.
+    threading.Thread(target=_ensure_desktop_icon, daemon=True).start()
     print(f"■ {C.get('교회명','')} 교회행정 웹 대시보드 실행 중 → {url}")
     if not os.environ.get("CHURCH_NOOPEN"):   # 업데이트 자동 재시작 시엔 새 탭 안 엶(F5로 갱신)
         print("  브라우저가 자동으로 열립니다. 종료: 이 창을 닫으세요.")
