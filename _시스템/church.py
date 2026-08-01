@@ -35,9 +35,84 @@ COPYRIGHT_NOTICE=("본 프로그램과 모든 참고자료의 저작권은 세�
     "본 프로그램은 '있는 그대로' 제공되며 사용에 따른 책임은 사용자에게 있습니다.")
 
 # ───────── DB ─────────
+def _recover_sources():
+    """자료 파일이 깨졌을 때 되돌릴 수 있는 곳 — 최신 순서대로."""
+    # ★순서가 곧 '얼마나 덜 잃는가'다.
+    #   저장 순서상 피닉스 스냅샷이 가장 최신 상태이고, .bak 은 그 직전 상태다.
+    #   따라서 최신 스냅샷부터 시도해야 잃는 자료가 가장 적다.
+    out=[]
+    try:
+        snaps=sorted(f for f in os.listdir(PHOENIX) if f.startswith("db_") and f.endswith(".json"))
+        for f in reversed(snaps[-10:]): out.append((os.path.join(PHOENIX,f),f"복구 스냅샷({f[3:18]})"))
+    except Exception: pass
+    if os.path.exists(DB+".bak"): out.append((DB+".bak","직전 자동백업"))
+    return out
+
+
+class _SaveAbort(Exception):
+    """저장을 의도적으로 멈춘 신호 — 바깥의 광범위 except 에 삼켜지면 안 된다."""
+    pass
+
+
+_DB_STAMP=None   # 읽은 시점의 자료 파일 상태(크기·시각) — 동시 사용 시 덮어쓰기 감지용
+
+
+def _db_stamp():
+    """자료 파일의 '지문' — 크기·시각만 보면 같은 초에 같은 크기로 바뀐 변경을 놓친다.
+       내용 해시까지 봐야 다른 창이 저장한 것을 확실히 알아챈다."""
+    try:
+        import hashlib
+        with open(DB,'rb') as f: raw=f.read()
+        return (len(raw), hashlib.md5(raw).hexdigest())
+    except Exception:
+        return None
+
+
 def load():
+    global _DB_STAMP
     if os.path.exists(DB):
-        return json.load(open(DB,encoding='utf-8'))
+        import time as _tm
+        _err=None
+        for _try in range(4):
+            try:
+                _DB_STAMP=_db_stamp()
+                return json.load(open(DB,encoding='utf-8'))
+            except ValueError as e:      # JSON 손상·인코딩 깨짐 → 진짜 복구 대상
+                _err=e; break
+            except OSError as e:         # 파일 잠김·권한 → 자료는 멀쩡하다. 잠시 뒤 재시도.
+                _err=e; _tm.sleep(0.5)
+        if isinstance(_err, OSError):
+            # ★★절대 복구하지 않는다. 백신·엑셀이 파일을 잠깐 잡은 것뿐인데 옛 스냅샷으로
+            #   덮으면, 멀쩡한 자료를 우리 손으로 지우는 것이 된다(가장 위험한 오작동).
+            print("⚠ 자료 파일을 열지 못했습니다 — 다른 프로그램(백신·엑셀 등)이 파일을 사용 중일 수 있습니다.")
+            print("   ★자료는 그대로 있습니다. 잠시 후 프로그램을 다시 실행해 주세요.")
+            print("   (멀쩡한 자료를 덮어쓰지 않기 위해 자동 복구를 하지 않았습니다)")
+            raise _err
+        if _err is not None:
+            e=_err
+            # ★자료 '내용'이 깨졌을 때만 여기 온다 — .bak·스냅샷으로 되돌린다.
+            import shutil as _sht
+            print(f"⚠ 자료 파일을 읽지 못했습니다({type(e).__name__}). 자동 복구를 시도합니다…")
+            for src,label in _recover_sources():
+                try: db=json.load(open(src,encoding='utf-8'))
+                except Exception: continue
+                try: _sht.copy2(DB, DB+".broken_"+datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+                except Exception: pass
+                restored=True
+                try: _sht.copy2(src, DB)
+                except Exception: restored=False
+                if restored:
+                    print(f"✅ {label} 에서 자료를 되살렸습니다. 계속 사용하셔도 됩니다.")
+                    print("   (읽지 못한 파일은 church_db.json.broken_… 이름으로 보관해 두었습니다)")
+                else:
+                    # 파일 교체에 실패했다 — 지금은 쓸 수 있지만 다음에 켜면 또 깨진 파일을 읽는다.
+                    print(f"⚠ {label} 의 내용으로 이번엔 계속 사용하실 수 있으나, 파일 되돌리기에 실패했습니다.")
+                    print("   프로그램을 끄지 마시고 먼저 자료를 백업해 주세요 — 화면의 「자료 백업」(번호 메뉴는 88번).")
+                    print("   그 뒤 다른 프로그램(백신·엑셀 등)이 파일을 잡고 있지 않은지 확인하고 다시 켜 주세요.")
+                return db
+            print("⚠ 자동 복구에 실패했습니다.")
+            print("   _백업 폴더의 최근 날짜 폴더에서 church_db.json 을 프로그램 폴더로 복사해 주세요.")
+            raise _err
     return {"교회":{"이름":CHURCH,"담임":PASTOR},"교인":[],"출석":[],"재정":[],"_seq":0}
 PHOENIX=os.path.join(BASE,"_피닉스")
 def _phoenix_snapshot(db):
@@ -53,7 +128,35 @@ def _phoenix_snapshot(db):
             except Exception: pass
     except Exception: pass
 def save(db):
+    global _DB_STAMP
     import shutil, tempfile
+    # ★동시 사용 보호 — 화면(웹)과 번호 메뉴를 함께 켜두시면, 한쪽이 저장한 내용을
+    #   다른 쪽이 모른 채 덮어써 조용히 사라질 수 있다(원자적 저장은 파일 깨짐만 막는다).
+    #   내가 읽은 뒤 파일이 바뀌었으면 그 버전을 따로 보관하고 알려 드린다.
+    try:
+        if _DB_STAMP is not None and os.path.exists(DB):
+            now=_db_stamp()
+            if now and now!=_DB_STAMP:
+                import datetime as _dt2
+                keep=DB+".conflict_"+_dt2.datetime.now().strftime("%Y%m%d_%H%M%S")
+                try:
+                    shutil.copy2(DB, keep)
+                except Exception as _ke:
+                    # ★보관에 실패했는데 그대로 저장하면 다른 창의 입력이 흔적 없이 사라진다.
+                    #   내 저장을 멈추는 편이 낫다 — 내 것은 다시 하면 되지만 남의 것은 되살릴 수 없다.
+                    print()
+                    print("  ██ 저장을 멈췄습니다 — 다른 창에서 저장한 자료를 보관하지 못했습니다. ██")
+                    print(f"     사유: {type(_ke).__name__} {str(_ke)[:70]}")
+                    print("     그대로 저장하면 다른 창에서 입력한 내용이 사라집니다.")
+                    print("     ① 다른 창(화면·번호 메뉴)을 닫아 주세요  ② 이 창에서 방금 하신 작업을 다시 실행해 주세요.")
+                    print()
+                    raise _SaveAbort(str(_ke))
+                print("⚠ 다른 창에서 저장한 자료가 있어 그 내용을 따로 보관했습니다.")
+                print(f"   보관 파일: {os.path.basename(keep)}")
+                print("   프로그램을 두 개 켜두시면 서로 덮어쓸 수 있습니다 — 하나만 켜고 쓰시는 것을 권합니다.")
+    except _SaveAbort:
+        raise                    # ★의도적 중단은 반드시 밖으로 내보낸다(삼키면 남의 자료가 사라진다)
+    except Exception: pass
     try:  # 롤링 백업(직전 상태 보존) — 업데이트·오작동 대비
         if os.path.exists(DB): shutil.copy2(DB, DB+".bak")
     except Exception: pass
@@ -64,10 +167,23 @@ def save(db):
         with open(tmp,'w',encoding='utf-8') as f:
             json.dump(db,f,ensure_ascii=False,indent=2)
         os.replace(tmp,DB)
+    except Exception as _se:
+        # ★저장 실패는 절대 조용히 넘어가면 안 된다.
+        #   목사님이 저장된 줄 알고 계속 입력하시다 프로그램을 끄면 그 입력이 통째로 사라진다.
+        print()
+        print("  ██ 저장하지 못했습니다 — 방금 입력하신 내용이 아직 저장되지 않았습니다. ██")
+        print(f"     사유: {type(_se).__name__} {str(_se)[:80]}")
+        print("     · 이전에 저장된 자료는 그대로 안전합니다(손상되지 않았습니다).")
+        print("     · 디스크 여유 공간과, 백신·엑셀이 파일을 잡고 있는지 확인해 주세요.")
+        print("     · USB에 저장 중이셨다면 USB가 빠지지 않았는지 확인해 주세요.")
+        print("     · 확인 후 방금 하신 작업을 다시 한 번 실행해 주세요.")
+        print()
+        raise
     finally:
         try:
             if os.path.exists(tmp): os.remove(tmp)
         except Exception: pass
+    _DB_STAMP=_db_stamp()   # 방금 내가 쓴 상태를 기준으로 갱신(내 저장을 충돌로 오인하지 않게)
     _phoenix_snapshot(db)   # 🔥 피닉스 스냅샷
     try: _ext_copy(DB)      # D·USB 자동 이중저장(설정 '백업폴더')
     except Exception: pass
@@ -3221,21 +3337,693 @@ def song_sheet(a):
         try: os.startfile(p); print(f"▶ 악보 여는 중: {hit[0]['제목']}")
         except Exception as e: print(f"✗ {e}")
     else: print(f"✗ '{hit[0]['제목']}' 악보 파일 없음 ('찬양곡·자작곡 등록'에서 악보를 함께 등록해 주세요)")
+# _IMPORT_ALIAS — 엑셀/CSV 열 이름이 교회마다 달라도 알아서 맞춘다(일괄 등록용)
+_IMPORT_ALIAS={
+ "이름":["이름","성명","성함","교인명","교우명","이 름","name"],
+ "성별":["성별","성","sex"],
+ "생년월일":["생년월일","생일","출생일","생년","birth","birthday"],
+ "연락처":["연락처","전화","전화번호","휴대폰","핸드폰","휴대전화","핸드폰번호","연락","tel","phone","mobile"],
+ "주소":["주소","거주지","자택주소","address"],
+ "직분":["직분","직책","교회직분","직위","role"],
+ "세례":["세례","세례여부","baptism"],
+ "세례일":["세례일","세례일자","세례받은날"],
+ "소속셀":["소속셀","셀","구역","목장","교구","소속","부서","속회"],
+ "인도자":["인도자","전도자","인도","인도한사람"],
+ "등록일":["등록일","등록일자","등록","최초등록일"],
+ "결혼상태":["결혼상태","결혼","혼인","혼인상태"],
+ "결혼기념일":["결혼기념일","결혼일","결혼기념"],
+ "학력":["학력","최종학력"],
+ "직장":["직장","직업","회사","근무처"],
+ "차량":["차량","자동차","차","차량번호"],
+ "메모":["메모","비고","특이사항","기타","note","memo"],
+}
+
+
+def _imp_norm(s):
+    """열 이름 비교용 정규화 — 공백·괄호·기호를 없애고 소문자로."""
+    return re.sub(r"[\s()\[\]·.,/_-]","",str(s or "")).lower()
+
+
+def _imp_val(v):
+    """엑셀 셀값을 문자열로 — 날짜는 YYYY-MM-DD, 전화번호는 앞의 0 복원."""
+    if v is None: return ""
+    if isinstance(v,(datetime.datetime,datetime.date)):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v,float) and v==int(v): v=int(v)
+    return str(v).strip()
+
+
+def _imp_tel(s):
+    """전화번호 정리 — 엑셀이 숫자로 읽어 앞자리 0이 사라진 경우 되살린다."""
+    t=re.sub(r"[^0-9]","",str(s or ""))
+    if not t: return str(s or "").strip()
+    if not t.startswith("0") and len(t) in (9,10): t="0"+t
+    if len(t)==11: return f"{t[:3]}-{t[3:7]}-{t[7:]}"
+    if len(t)==10: return (f"{t[:3]}-{t[3:6]}-{t[6:]}" if t.startswith("01") else f"{t[:2]}-{t[2:6]}-{t[6:]}")
+    return str(s or "").strip()
+
+
+def _imp_read(path, sheet=None):
+    """엑셀(.xlsx)·CSV를 [ {열이름: 값} ... ] 로 읽는다. 반환: (행목록, 원본열이름들)"""
+    ext=os.path.splitext(path)[1].lower()
+    rows=[]; headers=[]
+    if ext in (".xlsx",".xlsm"):
+        import openpyxl
+        wb=openpyxl.load_workbook(path,data_only=True)
+        ws=wb[sheet] if (sheet and sheet in wb.sheetnames) else wb[wb.sheetnames[0]]
+        data=list(ws.iter_rows(values_only=True))
+    else:
+        data=None
+        for enc in ("utf-8-sig","cp949","euc-kr","utf-8"):   # 한국 엑셀 CSV는 cp949가 많다
+            try:
+                import csv as _csv
+                with open(path,encoding=enc,newline="") as f:
+                    data=[tuple(r) for r in _csv.reader(f)]
+                break
+            except UnicodeDecodeError:
+                continue
+        if data is None: raise ValueError("파일 인코딩을 알 수 없습니다(엑셀에서 다시 저장해 보세요)")
+    # 헤더 = 값이 2개 이상 있는 첫 행
+    hi=-1
+    for i,r in enumerate(data):
+        if sum(1 for c in r if _imp_val(c))>=2: hi=i; break
+    if hi<0: return [],[]
+    headers=[_imp_val(c) for c in data[hi]]
+    for idx,r in enumerate(data[hi+1:], start=hi+2):   # 엑셀에서 보이는 실제 줄 번호
+        rec={}
+        for j,c in enumerate(r):
+            if j<len(headers) and headers[j]: rec[headers[j]]=_imp_val(c)
+        if any(v for v in rec.values()):
+            rec["__행__"]=idx
+            rows.append(rec)
+    return rows,headers
+
+
+def _imp_map(headers):
+    """원본 열이름 → 프로그램 항목명. 반환: ({원본:항목}, 못 알아본 열 목록)"""
+    m={}; unknown=[]
+    for h in headers:
+        if not h: continue
+        n=_imp_norm(h); hit=None
+        for field,aliases in _IMPORT_ALIAS.items():
+            if n in [_imp_norm(a) for a in aliases]: hit=field; break
+        if hit: m[h]=hit
+        else: unknown.append(h)
+    return m,unknown
+
+
+def _imp_check_sheet(title, catno, name_hint, summary, tables, dropped):
+    """가져오기 검수표(엑셀) — 목사님이 원장부와 직접 대조하실 수 있게 만든다.
+       미리보기 몇 줄로는 '내 장부와 정말 맞나'를 확인할 수 없다. 이 파일이 그 근거가 된다."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except Exception:
+        return ""
+    wb=openpyxl.Workbook(); wb.remove(wb.active)
+    thin=Side(style='thin',color='BBBBBB'); bd=Border(thin,thin,thin,thin)
+    def sheet(nm,headers,rows,color="3C6E3C"):
+        ws=wb.create_sheet(str(nm)[:31])
+        hf=Font(bold=True,color='FFFFFF',name='맑은 고딕',size=10)
+        fill=PatternFill('solid',fgColor=color)
+        for j,h in enumerate(headers,1):
+            c=ws.cell(1,j,h); c.font=hf; c.fill=fill
+            c.alignment=Alignment('center','center'); c.border=bd
+        for i,row in enumerate(rows,2):
+            for j,v in enumerate(row,1):
+                c=ws.cell(i,j,v); c.font=Font(name='맑은 고딕',size=10); c.border=bd
+                if isinstance(v,int) and not isinstance(v,bool): c.number_format='#,##0'
+        for j,h in enumerate(headers,1):
+            ws.column_dimensions[chr(64+j)].width=max(12,min(52,len(str(h))*2+8))
+        ws.freeze_panes="A2"
+        return ws
+    sheet("검수 요약",["확인 항목","값"],summary,"1F4E79")
+    for nm,hdr,rows in tables:
+        if rows: sheet(nm,hdr,rows)
+    sheet("옮기지 않은 줄",["엑셀 줄","사유","원본 내용"],
+          [[d.get("행"),d.get("사유"),d.get("내용")] for d in dropped],"C0504D")
+    out=os.path.join(CAT(catno), f"[{title}] {sanit(name_hint)}_{today()}.xlsx")
+    try: wb.save(out)
+    except Exception: return ""
+    return out
+
+
+def member_import(a):
+    """📥 교인 명단 한 번에 등록 — 엑셀·CSV 파일의 명단을 통째로 불러옵니다.
+       기본은 '미리보기'라 파일을 넣어도 자료가 바뀌지 않습니다. 확인 후 '실제등록'을 선택하세요.
+       ※ 실제 등록 직전에 자동으로 백업합니다."""
+    path=(getattr(a,"file","") or "").strip().strip('"').strip("'")
+    if not path:
+        print("■ 엑셀 또는 CSV 파일을 넣어 주세요.")
+        print("  · 첫 줄에 '이름 / 연락처 / 직분 / 소속셀' 같은 제목이 있으면 알아서 맞춰 드립니다.")
+        print("  · 이름 칸만 있어도 등록됩니다. 나머지는 나중에 채우셔도 됩니다.")
+        return
+    if not os.path.isabs(path):
+        for base in (os.getcwd(), BASE, os.path.join(BASE,"_내자료")):
+            c=os.path.join(base,path)
+            if os.path.exists(c): path=c; break
+    if not os.path.exists(path):
+        print(f"⚠ 파일을 찾지 못했습니다: {path}")
+        print("  파일을 프로그램 폴더에 두시고 파일 이름만 넣으셔도 됩니다.")
+        return
+    try:
+        rows,headers=_imp_read(path, (getattr(a,"sheet","") or "").strip() or None)
+    except Exception as e:
+        print(f"⚠ 파일을 읽지 못했습니다: {e}")
+        return
+    if not rows:
+        print("⚠ 명단을 찾지 못했습니다. 첫 줄에 제목(이름·연락처 등)이 있는지 확인해 주세요.")
+        return
+    cmap,unknown=_imp_map(headers)
+    if "이름" not in cmap.values():
+        print("⚠ '이름' 칸을 찾지 못했습니다.")
+        print(f"  파일의 열 이름: {', '.join([h for h in headers if h][:12])}")
+        print("  → 이름이 들어있는 열의 제목을 '이름'으로 바꾼 뒤 다시 시도해 주세요.")
+        return
+    db=load()
+    news=[]; dups=[]; blanks=0; mdrop=[]
+    for r in rows:
+        rec={}
+        for src,field in cmap.items():
+            v=r.get(src,"")
+            if v: rec[field]=(_imp_tel(v) if field=="연락처" else v)
+        nm=(rec.get("이름") or "").strip()
+        if not nm:
+            blanks+=1
+            mdrop.append({"행":r.get("__행__"),"사유":"이름 칸이 비어 있음",
+                          "내용":" | ".join(str(v)[:14] for k,v in r.items() if k!="__행__" and v)[:70]})
+            continue
+        rec["__행__"]=r.get("__행__")
+        (dups if find(db,nm) else news).append(rec)
+    apply=str(getattr(a,"apply","") or "").strip() in ("1","y","Y","예","네","실제등록","등록")
+    dupmode=(getattr(a,"dup","") or "").strip() or "건너뜀"
+    print("─"*46)
+    print(f"📄 파일: {os.path.basename(path)}")
+    print(f"   알아본 칸: {', '.join(sorted(set(cmap.values())))}")
+    if unknown: print(f"   사용 안 함: {', '.join(unknown[:8])}")
+    print(f"   명단 {len(rows)}줄 → 새로 등록 {len(news)}명 · 이미 있는 분 {len(dups)}명"+(f" · 이름 없음 {blanks}줄" if blanks else ""))
+    for s in news[:5]:
+        print(f"     · {s.get('이름')}  {s.get('직분','') or '-'}  {s.get('연락처','') or '-'}  {s.get('소속셀','') or '-'}")
+    if len(news)>5: print(f"     · … 외 {len(news)-5}명")
+    print("─"*46)
+    _msum=[["가져온 파일",os.path.basename(path)],["알아본 칸",", ".join(sorted(set(cmap.values())))],
+           ["사용하지 않은 칸",", ".join(unknown[:10]) or "-"],
+           ["원본에서 읽은 줄 수",len(rows)],["새로 등록할 분",len(news)],
+           ["이미 등록된 분",len(dups)],["옮기지 않은 줄",len(mdrop)]]
+    _mtab=[("새로 등록할 명단",["이름","직분","연락처","소속셀","생년월일"],
+            [[x.get("이름",""),x.get("직분",""),x.get("연락처",""),x.get("소속셀",""),x.get("생년월일","")] for x in news]),
+           ("이미 등록된 분",["이름","직분","연락처"],
+            [[x.get("이름",""),x.get("직분",""),x.get("연락처","")] for x in dups])]
+    _chk=_imp_check_sheet("교인 일괄등록 검수표","01",os.path.splitext(os.path.basename(path))[0],_msum,_mtab,mdrop)
+    if _chk:
+        print(f"   📋 검수표를 만들었습니다 — {_chk}")
+        print("      (새로 등록할 명단·이미 등록된 분·옮기지 않은 줄이 들어 있습니다)")
+    if not apply:
+        print("👀 지금은 미리보기입니다. 자료는 아직 바뀌지 않았습니다.")
+        print("   → 위 내용이 맞으면 '실제등록'에 1 을 넣고 다시 실행해 주세요.")
+        if dups: print(f"   → 이미 있는 {len(dups)}명은 기본적으로 건너뜁니다. 빈 칸만 채우시려면 '중복처리'에 보완 을 넣으세요.")
+        return
+    try:
+        bdir=backup(None)
+        print(f"🛟 등록 전 자동 백업 완료 ({os.path.basename(str(bdir))})")
+    except Exception as e:
+        print(f"⚠ 자동 백업에 실패했습니다({e}). 안전을 위해 등록을 중단합니다.")
+        print("   먼저 자료를 백업해 주세요 — 화면의 「자료 백업」(번호 메뉴는 88번).")
+        return
+    added=0
+    for rec in news:
+        db["_seq"]+=1
+        m={"id":db["_seq"],"이름":rec.get("이름",""),"성별":rec.get("성별",""),"생년월일":rec.get("생년월일",""),"생일양음":"",
+           "연락처":rec.get("연락처",""),"주소":rec.get("주소",""),"직분":rec.get("직분",""),"세례":rec.get("세례",""),
+           "세례일":rec.get("세례일",""),"학습일":"","유아세례일":"","입교일":"","결혼상태":rec.get("결혼상태",""),
+           "결혼기념일":rec.get("결혼기념일",""),"소속셀":rec.get("소속셀",""),"인도자":rec.get("인도자",""),
+           "등록경로":"","이전교회":"","전입일":"","학력":rec.get("학력",""),"직장":rec.get("직장",""),"차량":rec.get("차량",""),
+           "등록일":rec.get("등록일","") or today(),"심방주기":"","가족":[],
+           "직분이력":([{"날짜":today(),"직분":rec.get("직분"),"비고":"일괄등록"}] if rec.get("직분") else []),
+           "상태":"재적","심방이력":[],"기도제목누적":[],"메모":rec.get("메모","")}
+        db["교인"].append(m); added+=1
+    filled=0; ambiguous=[]
+    if dupmode.startswith("보완"):
+        for rec in dups:
+            nm=(rec.get("이름","") or "").strip()
+            # ★이름이 '정확히' 같은 한 분일 때만 채운다.
+            #   부분일치(예: 파일의 '영희' → 교적의 '김영희')로 남의 연락처·주소를 채우면 개인정보 사고다.
+            exact=[m for m in db["교인"] if (m.get("이름") or "").strip()==nm]
+            if len(exact)!=1: ambiguous.append(nm); continue
+            m=exact[0]; ch=False
+            for k,v in rec.items():
+                if k=="이름" or k.startswith("__") or not v: continue
+                if not (m.get(k) or ""): m[k]=v; ch=True     # 빈 칸만 채움 — 기존 자료는 절대 덮지 않는다
+            if ch: filled+=1
+    save(db)
+    print(f"✅ 일괄 등록 완료 — 새로 {added}명 등록"+(f" · 기존 {filled}명 빈 칸 보완" if filled else "")+f" · 건너뜀 {len(dups)-filled}명")
+    if ambiguous:
+        print(f"   ⚠ 어느 분인지 확실하지 않아 채우지 않은 분: {', '.join(ambiguous[:6])}"+(f" 외 {len(ambiguous)-6}명" if len(ambiguous)>6 else ""))
+        print("      → 같은 이름이 여러 분이거나, 교적의 이름과 정확히 일치하지 않는 경우입니다.")
+        print("      → 다른 분 정보가 섞이지 않도록 그대로 두었습니다. 교우 카드에서 직접 확인해 주세요.")
+    print("   교인 명단에서 바로 확인하실 수 있습니다.")
+
+
+# ── 재정 엑셀 가져오기 ─────────────────────────────────────────────────────
+# 작은 교회 재정부 엑셀은 실제로 세 가지 모양이다. 셋 다 인식한다.
+#  (A) 거래 목록형 : 날짜 | 적요 | 수입 | 지출        (또는 날짜|구분|항목|금액)
+#  (B) 월별 집계형 : 항목 | 1월 | 2월 … 12월 | 합계   (수입부/지출부 구역으로 나뉨)
+#  (C) 주간 헌금형 : 날짜 | 십일조 | 감사헌금 | 선교헌금 …  (헌금 종류가 열)
+_FIN_DATE=["날짜","일자","날자","일시","date","월일","년월일","연월일"]
+_FIN_IN=["수입","입금","수입금액","세입","받은돈","수입액"]
+_FIN_OUT=["지출","출금","지출금액","세출","쓴돈","지출액"]
+_FIN_ITEM=["항목","적요","내역","내용","과목","계정","비목","구분내역","사용처","용도"]
+_FIN_KIND=["구분","수입지출","입출","종류","유형"]
+_FIN_AMT=["금액","액수","금액(원)","amount"]
+_FIN_NAME=["교인","성명","이름","헌금자","납부자"]
+_FIN_DEPT=["부서","기관","교구","소속"]
+_FIN_MEMO=["비고","메모","특이사항","note"]
+_FIN_SKIP=["합계","소계","총계","계","누계","잔액","이월","전월이월","차월이월","합 계","총 계"]
+
+
+def _fin_amt(v):
+    """금액 문자열 → 정수. 1,200,000 / ₩1,200,000 / 1200000원 / (50,000)=음수 를 처리."""
+    s=str(v or "").strip()
+    if not s: return 0
+    neg = s.startswith("(") and s.endswith(")")
+    s=re.sub(r"[^0-9.\-]","",s)
+    if not s or s in ("-","."): return 0
+    try: n=int(round(float(s)))
+    except Exception: return 0
+    return -n if neg else n
+
+
+def _fin_date(v, year=None):
+    """날짜 → YYYY-MM-DD. 엑셀 날짜·2026-01-05·2026.1.5·1/5(연도 보충) 처리."""
+    if isinstance(v,(datetime.datetime,datetime.date)): return v.strftime("%Y-%m-%d")
+    s=str(v or "").strip()
+    if not s: return ""
+    nums=re.findall(r"\d+",s)
+    try:
+        if len(nums)>=3: y,m,d=int(nums[0]),int(nums[1]),int(nums[2])
+        elif len(nums)==2 and year: y,m,d=int(year),int(nums[0]),int(nums[1])
+        else: return ""
+        if y<100: y+=2000
+        # ★범위 검증 — 이게 없으면 '1,000,000' 같은 금액이 날짜(2001-00-00)로 둔갑한다.
+        #   그 값이 연도 자동추정에 쓰이면 엉뚱한 해로 재정이 통째로 들어간다.
+        if not (1900<=y<=2200 and 1<=m<=12 and 1<=d<=31): return ""
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except Exception:
+        return ""
+
+
+_KIND_OUT=["지출","출금","세출","비용","지급","사용","납부"]
+_KIND_IN=["수입","입금","세입","수납","헌금","받음"]
+
+
+def _fin_kind_of(k):
+    """구분 칸 값 → '수입'/'지출'/''(판단불가).
+       ★판단이 안 서면 추측하지 않는다 — 추측하면 돈이 반대편에 꽂힌다.
+       '차변·대변' 같은 회계 용어는 교회마다 쓰임이 달라 의도적으로 판단불가로 둔다."""
+    n=_imp_norm(k)
+    if not n: return "수입"          # 구분 칸 자체가 비면 기존 동작(수입) 유지
+    for w in _KIND_OUT:
+        if _imp_norm(w) in n: return "지출"
+    for w in _KIND_IN:
+        if _imp_norm(w) in n: return "수입"
+    return ""
+
+
+def _fin_heon_col(h):
+    """헌금 종류 열인지 판별 — '십일조헌금'·'감사'처럼 현실의 약칭·변형도 인식.
+       반환: 표준 헌금명(없으면 '')"""
+    n=_imp_norm(h)
+    if not n or n in ("헌금","합계","계","소계","총계"): return ""
+    # ★가장 '가까운' 것을 고른다 — 가장 긴 것을 고르면 '감사'가 '맥추감사헌금'으로,
+    #   '선교'가 '단기선교헌금'으로 잘못 붙는다(다른 계정이라 결산이 틀어진다).
+    #   우선순위: ①완전일치 ②앞부분 일치(감사→감사헌금) ③부분 포함, 같은 조건이면 짧은 쪽.
+    cands=[]
+    for x in _heongeum():
+        xn=_imp_norm(x)
+        if not xn or len(n)<2 or len(xn)<2: continue
+        if n==xn: return x
+        if xn.startswith(n) or n.startswith(xn): cands.append((0,len(xn),x))
+        elif xn in n or n in xn: cands.append((1,len(xn),x))
+    return min(cands)[2] if cands else ""
+
+
+def _fin_is_skip(s):
+    n=_imp_norm(s)
+    return any(_imp_norm(k)==n for k in _FIN_SKIP)
+
+
+def _fin_month_col(h):
+    """'1월'·'01월'·'1' 같은 월 열이면 월 숫자, 아니면 0."""
+    s=str(h or "").strip()
+    m=re.fullmatch(r"(\d{1,2})\s*월?", s)
+    if not m: return 0
+    v=int(m.group(1))
+    return v if 1<=v<=12 else 0
+
+
+def _fin_detect(headers):
+    """엑셀 모양 판별 → 'A'(거래목록) / 'B'(월별집계) / 'C'(주간헌금) / '' (판별불가)"""
+    hn={h:_imp_norm(h) for h in headers if h}
+    def has(cands): return any(v in [_imp_norm(c) for c in cands] for v in hn.values())
+    heon_cols=sum(1 for h in headers if h and _fin_heon_col(h))
+    months=sum(1 for h in headers if _fin_month_col(h))
+    if has(_FIN_DATE) and heon_cols>=2: return "C"
+    if has(_FIN_DATE) and (has(_FIN_IN) or has(_FIN_OUT)): return "A"
+    if has(_FIN_DATE) and has(_FIN_AMT): return "A"
+    if months>=3: return "B"
+    return ""
+
+
+def _fin_rows(rows, headers, shape, year):
+    """엑셀 행들 → 재정 레코드 목록. 반환: (레코드, 건너뛴 줄 수, 경고목록)"""
+    out=[]; skipped=0; warn=[]; unknown_kind=set(); dropped=[]
+    def _drop(r,why,txt=''):
+        nonlocal skipped
+        skipped+=1
+        dropped.append({'행':r.get('__행__'),'사유':why,'내용':txt or ' | '.join(str(v)[:14] for k,v in r.items() if k!='__행__' and v)[:70]})
+    def col(cands):
+        for h in headers:
+            if h and _imp_norm(h) in [_imp_norm(c) for c in cands]: return h
+        return None
+    cd=col(_FIN_DATE); ci=col(_FIN_ITEM); ck=col(_FIN_KIND); ca=col(_FIN_AMT)
+    cin=col(_FIN_IN); cout=col(_FIN_OUT); cn=col(_FIN_NAME); cdp=col(_FIN_DEPT); cm=col(_FIN_MEMO)
+    if shape=="A":
+        for r in rows:
+            item=(r.get(ci,"") if ci else "").strip()
+            if _fin_is_skip(item) or _fin_is_skip(r.get(cd,"")): _drop(r,'합계·소계 줄'); continue
+            dt=_fin_date(r.get(cd,""),year)
+            if not dt: _drop(r,'날짜를 읽지 못함'); continue
+            base={"날짜":dt,"교인":(r.get(cn,"") if cn else ""),"부서":(r.get(cdp,"") if cdp else ""),"메모":(r.get(cm,"") if cm else "")}
+            made=False
+            if cin and _fin_amt(r.get(cin,"")): out.append(dict(base,구분="수입",항목=item or "기타",금액=_fin_amt(r.get(cin,"")))); made=True
+            if cout and _fin_amt(r.get(cout,"")): out.append(dict(base,구분="지출",항목=item or "기타",금액=_fin_amt(r.get(cout,"")))); made=True
+            if not made and ca and _fin_amt(r.get(ca,"")):
+                k=(r.get(ck,"") if ck else "").strip()
+                kind=_fin_kind_of(k)
+                if not kind:                      # 판단불가 → 추측하지 않고 보류(게이트가 반영을 막는다)
+                    unknown_kind.add(k[:12]); _drop(r,f"구분값 '{k[:12]}' 을 수입·지출로 판단 불가"); continue
+                out.append(dict(base,구분=kind,항목=item or "기타",금액=_fin_amt(r.get(ca,""))))
+                made=True
+            if not made: _drop(r,'금액이 비어 있음')
+    elif shape=="C":
+        hmap={h:_fin_heon_col(h) for h in headers if h and _fin_heon_col(h)}
+        for r in rows:
+            if _fin_is_skip(r.get(cd,"")): _drop(r,'합계·소계 줄'); continue
+            dt=_fin_date(r.get(cd,""),year)
+            if not dt: _drop(r,'날짜를 읽지 못함'); continue
+            nm=(r.get(cn,"") if cn else "")
+            any_amt=False
+            for h in hmap:
+                v=_fin_amt(r.get(h,""))
+                if v:
+                    out.append({"날짜":dt,"구분":"수입","항목":hmap[h],"금액":v,"교인":nm,"부서":"","메모":""}); any_amt=True
+            if not any_amt: _drop(r,'헌금 금액이 모두 비어 있음')
+    elif shape=="B":
+        if not year: warn.append("월별 집계표는 연도가 필요합니다 — '연도'에 2026 처럼 넣어 주세요.")
+        mcols=[(h,_fin_month_col(h)) for h in headers if _fin_month_col(h)]
+        first=headers[0] if headers else None
+        section=""
+        for r in rows:
+            label=str(r.get(first,"") or "").strip()
+            ln=_imp_norm(label)
+            if ln in ("수입","세입","수입부","수입합계부","입금"): section="수입"; continue
+            if ln in ("지출","세출","지출부","출금"): section="지출"; continue
+            if not label or _fin_is_skip(label): _drop(r,'합계·소계 줄' if label else '항목명 없음'); continue
+            kind=section or ("지출" if any(_imp_norm(label)==_imp_norm(x) for x in _jichul()) else "수입")
+            for h,mn in mcols:
+                v=_fin_amt(r.get(h,""))
+                if v: out.append({"날짜":f"{year}-{mn:02d}-01","구분":kind,"항목":label,"금액":v,"교인":"","부서":"","메모":"월별 집계"})
+        if not section: warn.append("'수입'·'지출' 구역 표시를 찾지 못해 항목 이름으로 추정했습니다 — 미리보기에서 꼭 확인해 주세요.")
+    return out,skipped,warn,unknown_kind,dropped
+
+
+def finance_import(a):
+    """💰 재정 엑셀 가져오기 — 재정부가 엑셀로 정리한 수입·지출을 그대로 불러옵니다.
+       거래 목록형·월별 집계형·주간 헌금표 세 가지를 모두 인식합니다.
+       기본은 미리보기(자료 변경 없음)이며, 실제 반영 직전 자동 백업합니다."""
+    path=(getattr(a,"file","") or "").strip().strip('"').strip("'")
+    if not path:
+        print("■ 재정 엑셀(.xlsx) 또는 CSV 파일을 넣어 주세요. 아래 세 가지 모양을 알아서 인식합니다.")
+        print("   ① 날짜 | 적요 | 수입 | 지출          (가장 흔한 거래 장부)")
+        print("   ② 항목 | 1월 | 2월 … 12월           (연간 결산표 · '연도'를 함께 넣어 주세요)")
+        print("   ③ 날짜 | 십일조 | 감사헌금 | 선교…   (주간 헌금 집계표)")
+        return
+    if not os.path.isabs(path):
+        for base in (os.getcwd(), BASE, os.path.join(BASE,"_내자료")):
+            c=os.path.join(base,path)
+            if os.path.exists(c): path=c; break
+    if not os.path.exists(path):
+        print(f"⚠ 파일을 찾지 못했습니다: {path}"); return
+    try:
+        rows,headers=_imp_read(path,(getattr(a,"sheet","") or "").strip() or None)
+    except Exception as e:
+        print(f"⚠ 파일을 읽지 못했습니다: {e}"); return
+    if not rows: print("⚠ 내용을 찾지 못했습니다. 첫 줄에 제목(날짜·항목·수입·지출 등)이 있는지 확인해 주세요."); return
+    shape=(getattr(a,"shape","") or "").strip().upper() or _fin_detect(headers)
+    if shape not in ("A","B","C"):
+        print("⚠ 엑셀 모양을 알아보지 못했습니다.")
+        print(f"  파일의 열 이름: {', '.join([h for h in headers if h][:12])}")
+        print("  → 열 제목에 '날짜'와 '수입'·'지출'(또는 '금액')이 있으면 자동으로 인식합니다.")
+        return
+    # ★연도는 4자리 숫자만 인정한다 — '26'·'2026년'을 그대로 쓰면 '26-01-01' 같은 잘못된 날짜가 저장된다.
+    _y=re.search(r"(19|20)\d{2}", (getattr(a,"year","") or ""))
+    year=_y.group(0) if _y else ""
+    if not year:
+        # 월별 집계표(B)에는 날짜 칸이 없다 — 파일 이름에서만 조심스럽게 찾고, 없으면 비워 둔다(게이트가 막는다).
+        if shape=="B":
+            _fy=re.search(r"(19|20)\d{2}", os.path.basename(path))
+            year=_fy.group(0) if _fy else ""
+        else:
+            cd0=None
+            for h in headers:
+                if h and _imp_norm(h) in [_imp_norm(c) for c in _FIN_DATE]: cd0=h; break
+            for r in rows[:30]:
+                d=_fin_date(r.get(cd0,"")) if cd0 else ""
+                if d: year=d[:4]; break
+    recs,skipped,warn,unknown_kind,dropped=_fin_rows(rows,headers,shape,year)
+    if not recs:
+        print("⚠ 옮길 수 있는 금액을 찾지 못했습니다.")
+        if unknown_kind:
+            print(f"  · 원인: '구분' 칸의 값을 수입인지 지출인지 판단할 수 없었습니다 → {', '.join(sorted(unknown_kind)[:5])}")
+            print("  · 해결: 엑셀의 '구분' 칸을 '수입' 또는 '지출'로 고쳐 주시거나,")
+            print("          수입과 지출을 각각 다른 칸으로 나눠 주시면 됩니다.")
+        else:
+            print("  · 날짜·금액 칸이 비어 있거나, 합계 줄만 있는지 확인해 주세요.")
+        for w in warn: print("  ·",w)
+        return
+    db=load()
+    # ★중복 판정은 '건수'로 센다(집합이 아니라 개수) — 같은 주일에 서로 다른 교인이 같은 금액의
+    #   십일조를 드리는 일은 흔하다. 집합으로 보면 둘째 분 헌금이 조용히 사라진다(돈 누락).
+    #   교인·부서까지 서명에 넣고, 이미 있는 건수만큼만 건너뛴다.
+    import collections as _col
+    def _sig(r):
+        return ((r.get("날짜") or ""),(r.get("구분") or ""),(r.get("항목") or "").strip(),
+                int(r.get("금액") or 0),(r.get("교인") or "").strip(),(r.get("부서") or "").strip(),
+                (r.get("메모") or "").strip())
+    _have=_col.Counter(_sig(r) for r in db.get("재정",[]))
+    fresh=[]; dup=0
+    for r in recs:
+        k=_sig(r)
+        if _have.get(k,0)>0: _have[k]-=1; dup+=1
+        else: fresh.append(r)
+    inc=sum(r["금액"] for r in fresh if r["구분"]=="수입"); exp=sum(r["금액"] for r in fresh if r["구분"]=="지출")
+    shape_name={"A":"거래 목록형","B":"월별 집계형","C":"주간 헌금표"}[shape]
+    print("─"*52)
+    print(f"📄 파일: {os.path.basename(path)}   ·   인식한 모양: {shape_name}")
+    if year: print(f"   기준 연도: {year}")
+    print(f"   옮길 내역 {len(fresh)}건"+(f" · 이미 있어 건너뜀 {dup}건" if dup else "")+(f" · 제외 {skipped}줄(합계·빈줄 등)" if skipped else ""))
+    print(f"   수입 {inc:,}원 · 지출 {exp:,}원 · 차액 {inc-exp:,}원")
+    for r in fresh[:6]:
+        print(f"     · {r['날짜']}  [{r['구분']}]  {r['항목'][:16]}  {r['금액']:,}원")
+    if len(fresh)>6: print(f"     · … 외 {len(fresh)-6}건")
+    # ★출고 게이트 — 돈이 틀리게 들어갈 수 있는 상태에서는 반영을 막는다(미리보기는 항상 허용).
+    block=[]
+    if shape=="B" and not year:
+        block.append("연도를 알 수 없습니다 — 월별 결산표는 '연도'(예: 2026)를 넣어 주셔야 날짜가 바르게 들어갑니다.")
+    negs=[r for r in fresh if r["금액"]<0]
+    if negs:
+        block.append(f"마이너스 금액 {len(negs)}건이 있습니다(예: {negs[0]['항목']} {negs[0]['금액']:,}원). "
+                     "환불·정정이면 그대로 두셔도 되지만, 괄호 표기가 잘못 읽힌 것일 수 있어 확인이 필요합니다. "
+                     "확인하셨으면 '마이너스허용'에 1 을 넣어 주세요.")
+        if str(getattr(a,"allowneg","") or "").strip() in ("1","y","Y","예","네"): block.pop()
+    if unknown_kind:
+        block.append(f"수입·지출을 판단할 수 없는 구분값이 있습니다: {', '.join(sorted(unknown_kind)[:5])} "
+                     "— 엑셀의 '구분' 칸을 '수입'/'지출'로 고쳐 주시거나, 수입·지출을 각각 다른 칸으로 나눠 주세요.")
+    # ★검수표 — 미리보기·반영 어느 쪽이든 항상 만든다. 목사님이 원장부와 대조하실 근거다.
+    _mon={}; _item={}
+    for r in fresh:
+        mi=(r["날짜"] or "")[:7]
+        _mon.setdefault(mi,[0,0]); _item.setdefault((r["구분"],r["항목"]),[0,0])
+        k=0 if r["구분"]=="수입" else 1
+        _mon[mi][k]+=r["금액"]; _item[(r["구분"],r["항목"])][0]+=1; _item[(r["구분"],r["항목"])][1]+=r["금액"]
+    _summary=[["가져온 파일",os.path.basename(path)],["인식한 모양",shape_name],["기준 연도",year or "-"],
+              ["원본에서 읽은 줄 수",len(rows)],["옮길 내역(건)",len(fresh)],
+              ["이미 있어 건너뛴 건",dup],["옮기지 않은 줄",len(dropped)],
+              ["수입 합계(원)",inc],["지출 합계(원)",exp],["차액(원)",inc-exp],
+              ["※ 확인","위 수입·지출 합계가 교회 장부와 같은지 대조해 주세요."]]
+    _tables=[("월별 대조",["월","수입","지출"],[[m,v[0],v[1]] for m,v in sorted(_mon.items())]),
+             ("항목별 대조",["구분","항목","건수","합계"],
+              [[k[0],k[1],v[0],v[1]] for k,v in sorted(_item.items(), key=lambda x:(x[0][0],-x[1][1]))])]
+    chk=_imp_check_sheet("재정 가져오기 검수표","06",os.path.splitext(os.path.basename(path))[0],_summary,_tables,dropped)
+    for w in warn: print("   ⚠",w)
+    for b in block: print("   ⛔",b)
+    if chk:
+        print(f"   📋 검수표를 만들었습니다 — {chk}")
+        print("      (월별·항목별 대조표와 '옮기지 않은 줄' 목록이 들어 있습니다. 장부와 맞춰 보세요)")
+    print("─"*52)
+    if block:
+        print("⛔ 위 사항 때문에 반영하지 않았습니다. 자료는 그대로입니다.")
+        print("   돈이 틀리게 들어가는 것을 막기 위한 안전장치입니다. 위 내용을 고치신 뒤 다시 넣어 주세요.")
+        return
+    if str(getattr(a,"apply","") or "").strip() not in ("1","y","Y","예","네","등록"):
+        print("👀 지금은 미리보기입니다. 자료는 아직 바뀌지 않았습니다.")
+        print("   → 수입·지출 합계가 장부와 맞는지 먼저 확인해 주세요.")
+        print("   → 맞으면 '실제반영'에 1 을 넣고 다시 실행하세요. (반영 직전 자동 백업)")
+        return
+    try:
+        bdir=backup(None); print(f"🛟 반영 전 자동 백업 완료 ({os.path.basename(str(bdir))})")
+    except Exception as e:
+        print(f"⚠ 자동 백업 실패({e}) — 안전을 위해 중단합니다.")
+        print("   먼저 자료를 백업해 주세요 — 화면의 「자료 백업」(번호 메뉴는 88번).")
+        return
+    db.setdefault("재정",[]).extend(fresh); save(db)
+    print(f"✅ 재정 반영 완료 — {len(fresh)}건 (수입 {inc:,}원 · 지출 {exp:,}원)")
+    print("   이제 '재정 결산·통계'에서 연간 결산서와 항목별 집계를 바로 뽑으실 수 있습니다.")
+
+
+def _update_alarm(upd):
+    """새 업데이트 알림 — 눈에 잘 띄는 안내 + 알림음.
+       목사님께 따로 연락드리지 않아도 프로그램을 켜시면 바로 아시도록 한다.
+       소리는 환경에 따라 안 날 수 있으므로 실패해도 조용히 넘어간다(화면 안내가 본체)."""
+    try:
+        line="─"*44
+        print("  ┌"+line+"┐")
+        print(f"  │  🔔  새 업데이트가 나왔습니다!   v{upd[0]}")
+        print( "  │      →   99  를 누르시면 최신으로 바뀝니다.")
+        print( "  │      교인·심방·재정 등 자료는 그대로 보존됩니다.")
+        print("  └"+line+"┘")
+    except Exception:
+        pass
+    try:
+        import winsound
+        winsound.Beep(880,170); winsound.Beep(1175,220)
+    except Exception:
+        try: print("\a", end="", flush=True)
+        except Exception: pass
+
+
+def _cfg_set(key, val):
+    """설정 파일에 한 항목 저장(있으면 갱신).
+       ★반드시 파일을 다시 읽어서 갱신한다 — 메모리에 들고 있던 옛 설정으로 통째로 쓰면
+       바로 직전에 다른 기능이 저장한 값(예: 방금 입력한 교회 이름)을 지워버린다."""
+    try:
+        c={}
+        if os.path.exists(CONFIG):
+            try:
+                c=json.load(open(CONFIG,encoding='utf-8')) or {}
+            except Exception:
+                # ★설정 파일이 깨져 있을 때 그냥 새로 쓰면 교회명·백업폴더·업데이트주소가
+                #   통째로 사라진다. 원본을 반드시 남기고, 그 사실을 분명히 알린다.
+                try:
+                    import shutil as _s
+                    _bk=CONFIG+".broken_"+datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    _s.copy2(CONFIG,_bk)
+                    print(f"⚠ 설정 파일을 읽지 못했습니다 — 이전 설정을 {os.path.basename(_bk)} 로 보관했습니다.")
+                except Exception:
+                    print("⚠ 설정 파일을 읽지 못했습니다.")
+                print("   교회 이름·백업 폴더 설정을 다시 한 번 넣어 주세요. (교인·재정 자료와는 무관합니다)")
+                c={}
+        if not isinstance(c,dict): c={}
+        c[key]=val
+        json.dump(c, open(CONFIG,'w',encoding='utf-8'), ensure_ascii=False, indent=2)
+        _C.clear(); _C.update(c)
+        return True
+    except Exception:
+        return False
+
+
+def _first_run_wizard():
+    """첫 실행 안내 — 딱 두 가지(교회 이름·백업 위치)만 여쭙는다.
+       ★설정을 다 시키려 들면 목사님이 지치신다. 나머지는 쓰시면서 익히시면 된다.
+       언제든 엔터로 건너뛸 수 있고, 어떤 오류에도 프로그램 진행을 막지 않는다."""
+    try:
+        if _C.get("첫설정완료"): return
+        ch=(_C.get("교회명") or "").strip()
+        if ch and ch not in ("○○교회","OO교회","교회",""):
+            _cfg_set("첫설정완료", True); return    # 이미 교회 이름을 넣으신 분은 건너뜀
+        import types
+        print()
+        print("  ┌────────────────────────────────────────────────┐")
+        print("  │  처음 오셨군요. 딱 두 가지만 여쭙겠습니다.      │")
+        print("  │  그냥 엔터를 누르시면 건너뜁니다(나중에 가능).  │")
+        print("  └────────────────────────────────────────────────┘")
+        name=input("   ① 교회 이름 (예: 은혜교회) : ").strip()
+        pastor=input("   ② 담임목사님 성함 (예: 홍길동 목사) : ").strip()
+        if name or pastor:
+            church_setup(types.SimpleNamespace(church=name, pastor=pastor))
+        print()
+        print("   ③ 자료를 USB에도 자동 보관해 드릴까요?")
+        print("      컴퓨터가 고장 나도 교적을 잃지 않는 가장 확실한 방법입니다.")
+        bk=input("      USB·폴더 경로 (예: E:\\교회백업 · 원치 않으시면 엔터) : ").strip()
+        if bk:
+            set_backup(types.SimpleNamespace(path=bk, to=""))
+        print()
+        print("  ✅ 준비되었습니다. 이제 번호만 누르시면 됩니다.")
+        print("     · 교인 명단이 엑셀에 있으시면   →  21 번  (한 번에 등록)")
+        print("     · 재정을 엑셀로 하고 계시면     →  22 번  (쓰시던 엑셀 그대로)")
+        print("     · 한 달에 한 번 자료 지키기     →  88 번")
+        print("     · 자세한 안내는 프로그램 폴더의 「★ 처음 시작하기 (10분 안내)」 파일에 있습니다.")
+        print()
+        _cfg_set("첫설정완료", True)
+    except Exception:
+        pass
+
+
+def _backup_nudge():
+    """백업 안내 — 가장 큰 사고는 기능 오류가 아니라 컴퓨터 고장으로 인한 자료 소실이다.
+       강제하지 않고 메뉴에 한 줄로만 알린다. 어떤 이유로도 메뉴 진행을 막지 않는다(전체 try)."""
+    try:
+        _bf=_C.get("백업폴더")
+        if not _bf:
+            print("  💾 USB 자동저장이 아직 설정되지 않았습니다 — 한 번만 지정해 두시면 자료가 자동으로 이중 보관됩니다.")
+        elif not os.path.isdir(_bf):
+            # ★설정만 되어 있고 실제로 없으면, 이중보관되는 줄 아시다가 정작 필요할 때 없다.
+            print(f"  ⚠ USB 자동저장 폴더를 찾을 수 없습니다: {_bf}")
+            print("     USB를 꽂아 주시거나 저장 폴더를 다시 지정해 주세요. (지금은 이중 보관이 안 되고 있습니다)")
+        days=None
+        bdir=os.path.join(BASE,"_백업")
+        if os.path.isdir(bdir):
+            stamps=[d for d in os.listdir(bdir) if len(d)>=8 and d[:8].isdigit()]
+            if stamps:
+                s=max(stamps)[:8]
+                d0=datetime.date(int(s[:4]),int(s[4:6]),int(s[6:8]))
+                days=(datetime.date.today()-d0).days
+        if days is None:
+            print("  💾 아직 백업하신 적이 없습니다 —  88 번을 한 번만 눌러 주세요 (자료를 지키는 가장 확실한 방법입니다).")
+        elif days>=30:
+            print(f"  💾 마지막 백업 이후 {days}일 지났습니다 —  88 번을 눌러 주세요. (1분이면 끝납니다)")
+    except Exception:
+        pass
+
+
 def menu(a):
     """간편 메뉴 — 번호만 누르면 되는 대화형(명령어 몰라도 사용). 시작.bat로 실행."""
     import types
     def NS(**kw): return types.SimpleNamespace(**kw)
     def ask(p): return input(p).strip()
+    _first_run_wizard()
     while True:
         print(f"\n══════ {CHURCH} 교회 종합행정 ══════")
         upd=_check_update()
-        if upd: print(f"  🔔 새 업데이트 v{upd[0]} 있습니다!  →  99 를 눌러 업데이트 (교인·설교 등 자료는 영구 보존)")
+        if upd: _update_alarm(upd)
+        _backup_nudge()
         print("  1 교인등록    2 심방브리핑   3 심방기록    4 증명서발급")
         print("  5 주보만들기  6 오늘의묵상   7 생일자확인  8 찬양콘티")
         print("  9 성경찾기   10 엑셀정리    11 돌봄필요   12 주간브리핑")
         print(" 13 집회일정   14 학생등록    15 시험응원   16 선교준비")
         print(" 17 설교이력   18 설교작성    19 지난설교 재생성")
-        print(" 20 기능요청   77 피닉스복구  88 자료백업   99 업데이트")
+        print(" 20 기능요청   21 교인 일괄등록(엑셀 명단)   22 재정 엑셀 가져오기")
+        print(" 77 피닉스복구  88 자료백업   99 업데이트")
         print("  0 종료")
         c=ask("번호 선택> ")
         try:
@@ -3260,33 +4048,67 @@ def menu(a):
             elif c=="18": sermon(NS(title=ask("설교 제목: "),text=ask("본문(예 요3:16): "),service=(ask("예배유형(새벽/수요/목요집회/금요/주일오전/주일오후/중고등부/초등부): ") or "주일오전예배"),theme=ask("주제(키워드): "),points=ask("대지(;로 구분, 모르면 엔터): "),series=ask("시리즈(없으면 엔터): "),date=""))
             elif c=="19": sermon_reuse(NS(query=ask("지난 설교 검색(본문/제목): "),title="",text="",theme="",service="",date=""))
             elif c=="20": request(NS(text=ask("원하는 기능을 적어주세요: ")))
+            elif c=="21":
+                print("  ※ 엑셀·CSV 파일을 프로그램 폴더에 두시면 파일 이름만 넣으셔도 됩니다.")
+                print("  ※ 먼저 미리보기로 확인하신 뒤 등록하세요. 등록 직전 자동 백업됩니다.")
+                member_import(NS(file=ask("엑셀·CSV 파일: "),sheet="",
+                                 dup=(ask("이미 등록된 분 처리 (건너뜀=엔터 / 빈칸만 채우기=보완): ") or "건너뜀"),
+                                 apply=(ask("실제로 등록할까요? (미리보기=엔터 / 등록=1): ") or "")))
+            elif c=="22":
+                print("  ※ 재정부가 엑셀로 정리하신 파일을 그대로 넣으시면 됩니다.")
+                print("  ※ 먼저 미리보기로 수입·지출 합계가 장부와 맞는지 확인하세요. 반영 직전 자동 백업됩니다.")
+                finance_import(NS(file=ask("재정 엑셀·CSV 파일: "),sheet="",shape="",
+                                  year=ask("연도(월별 결산표일 때만 · 예 2026, 아니면 엔터): "),
+                                  apply=(ask("실제로 반영할까요? (미리보기=엔터 / 반영=1): ") or "")))
             elif c=="88": backup(NS())
             elif c=="99":
                 if upd: update(NS(file=upd[1])); print("  ✅ 업데이트 완료! 교인·설교 등 자료는 영구 보존되었습니다. 프로그램을 다시 실행하세요.")
                 else: print("  현재 최신 버전입니다.")
             else: print("→ 없는 번호입니다.")
         except Exception as e: print("오류:",e)
-VERSION="2026-07-27 (★교적 확장+카드 병합: ①한 카드로 교우 등록·수정·조회[이름만=조회·필요칸만=등록/수정·데이터 안전]+생일 양/음·직분 연혁·가정식구·전교회·학습/세례/유아세례/입교·학력/직장/결혼/차량·인도자 ②목양 카드를 교우 카드 바로 옆에·병합 정보 모두 반영(직분 연혁 포함) ③조회→'📄 목양 카드' 원클릭 ④심방 3카드→'심방 센터' 하나로[이름없이=대심방 현황·상황별 지침 바로가기, 이름=브리핑+버튼]) / 이전: 설교·단기선교·헌금집계 등"
+VERSION="2026-07-31 (★엑셀 그대로 가져오기: ①교인 명단 일괄등록[열이름 자동인식·이름칸만 있으면 됨·전화번호 앞 0 복원·미리보기 후 등록·등록 직전 자동백업·기존 정보 절대 덮어쓰지 않음] ②재정 엑셀 가져오기[거래장부/월별결산표/주간헌금표 3형태 자동인식·합계소계 줄 자동제외·₩·원 표기 인식·중복 자동 건너뜀] ③★검수표 자동생성[검수요약·월별대조·항목별대조·옮기지 않은 줄까지 엑셀로 — 재정은 틀리면 안 되므로] ④백업 안 하신 지 오래되면 메뉴에서 알려드림·USB 폴더 지정 시 자동 이중저장 ⑤새 업데이트 나오면 켤 때 알림 띠+소리 ⑥목사님용 안내문 3종 동봉[처음 시작하기·문제 해결·개인정보 동의서 서식]) / 이전: 교적 확장·목양카드·심방센터·설교·단기선교·헌금집계 등"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
 def _vt(v):
     try: return tuple(int(x) for x in str(v).split("."))
     except Exception: return (0,)
+_UPD_CACHE=[]   # 한 번만 확인한다 — 메뉴가 다시 그려질 때마다 인터넷을 부르면 번호 메뉴가 느려진다.
 def _check_update():
-    """_업데이트 폴더에 더 새로운 church.py가 있으면 (새버전, 경로) 반환."""
+    """새 업데이트가 있으면 (새버전, church.py 경로 또는 None) 반환. 없으면 None.
+       ① _업데이트 폴더에 더 새로운 church.py가 있으면 그 파일(구방식)
+       ② 없으면 발행 주소(깃허브)·_업데이트 폴더의 manifest.json 기준(신방식 — 웹 '업데이트' 버튼과 같은 길)
+       ★버전 표기가 'YYYY-MM-DD (설명…)' 이므로 반드시 날짜로 비교한다(_ver_date).
+         예전의 숫자 정규식([\\d.]+)은 이 표기를 아예 못 읽어 항상 None을 돌려주었고,
+         그 결과 번호 메뉴에서 업데이트 알림이 뜨지 않고 99번도 늘 '최신'이라고 답했다."""
+    if _UPD_CACHE: return _UPD_CACHE[0]
+    res=None
     p=os.path.join(BASE,"_업데이트","church.py")
-    if not os.path.exists(p): return None
-    try:
-        m=re.search(r'VERSION\s*=\s*["\']([\d.]+)["\']',open(p,encoding='utf-8').read())
-        if m and _vt(m.group(1))>_vt(VERSION): return (m.group(1),p)
-    except Exception: pass
-    return None
+    if os.path.exists(p):
+        try:
+            m=re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']',open(p,encoding='utf-8').read())
+            if m and _ver_date(m.group(1))>_ver_date(VERSION): res=(m.group(1),p)
+        except Exception: pass
+    if res is None:
+        try:
+            import json as _j
+            base=_C.get("업데이트기준URL") or _C.get("업데이트URL") or _UPDATE_BASE_DEFAULT
+            localup=os.path.join(BASE,"_업데이트")
+            if not base and os.path.exists(os.path.join(localup,"manifest.json")): base=localup
+            if base:
+                man=_j.loads(_upd_fetch(base,"manifest.json",timeout=8).decode('utf-8'))
+                rv=str(man.get("version",""))
+                # 경로 None = 매니페스트 방식으로 받으라는 뜻(update가 알아서 전체 파일을 내려받는다)
+                if _ver_date(rv)>_ver_date(VERSION): res=(rv,None)
+        except Exception: pass   # 인터넷이 없어도 프로그램은 그대로 열려야 한다
+    _UPD_CACHE.append(res)
+    return res
 def version(a):
     print(f"■ {CHURCH} 교회 종합행정시스템 · 엔진 church.py v{VERSION}")
     up=_check_update()
-    if up: print(f"  🔔 새 업데이트 v{up[0]} 있음! →  python church.py update --file \"{up[1]}\"")
-    else:  print("  ✅ 현재 최신 버전입니다.")
+    if up and up[1]: print(f"  🔔 새 업데이트 v{up[0]} 있음! →  python church.py update --file \"{up[1]}\"")
+    elif up:         print(f"  🔔 새 업데이트 v{up[0]} 있음! →  번호 메뉴 99번(또는 화면의 '업데이트' 버튼)")
+    else:            print("  ✅ 현재 최신 버전입니다.")
     print("  🔄 업데이트 가능 — 화석이 아니라 계속 발전하는 프로그램입니다.")
     print("  🔒 자료는 영구 보존 — 업데이트해도 교인·심방·설교·재정·예화·주석·찬양곡 등")
     print("      모든 자료(church_db.json·church_config.json·_내자료)는 절대 삭제되지 않습니다.")
@@ -3353,15 +4175,27 @@ def update(a):
     if man.get("notes"): print(f"   ✨ 새 기능: {man['notes']}")
     backup(a)  # 자료 먼저 백업
     ROOT=os.path.dirname(BASE); ROOTN=os.path.normpath(ROOT)   # 설치 루트(_시스템의 상위) = manifest 경로 기준
-    prot_files={"church_config.json","church_db.json"}
+    # ★대소문자를 반드시 무시한다 — Windows는 파일명 대소문자를 구분하지 않으므로
+    #   매니페스트에 CHURCH_DB.JSON 이 들어오면 보호를 그냥 지나쳐 교적을 덮어쓴다.
+    prot_files={"church_config.json","church_db.json","church_db.json.bak"}
     prot_dirs={"_내자료","_백업","_업데이트백업",os.path.basename(PHOENIX)}
+    _protf={x.lower() for x in prot_files}
+    _protd={x.lower() for x in prot_dirs}
     stamp=datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     bdir=os.path.join(BASE,"_업데이트백업",stamp)
     ok=0; fail=[]
     for rel in man.get("files",[]):
         reln=str(rel).replace("\\","/").lstrip("/")
         segs=reln.split("/")
-        if os.path.basename(reln) in prot_files or any(s in prot_dirs for s in segs):
+        _bn=os.path.basename(reln).lower()
+        _dstc=os.path.normpath(os.path.join(ROOT, reln.replace("/",os.sep)))
+        _same=False
+        for _pp in (DB, CONFIG, DB+".bak"):     # ★실제 파일이 같으면 이름이 어떻든 보호(8.3 단축이름·대소문자 무력화)
+            try:
+                if os.path.exists(_dstc) and os.path.exists(_pp) and os.path.samefile(_dstc,_pp): _same=True; break
+            except Exception: pass
+        if (_same or _bn in _protf or _bn.startswith("church_db.json") or _bn.startswith("church_config.json")
+                or any(str(x).lower() in _protd for x in segs)):
             continue   # 자료·개인폴더(교인·설정·내자료·백업)는 절대 덮지 않음
         dst=os.path.normpath(os.path.join(ROOT, reln.replace("/",os.sep)))
         if not (dst==ROOTN or dst.startswith(ROOTN+os.sep)):
@@ -3406,9 +4240,23 @@ def phoenix(a):
         else:
             target=next((s for s in reversed(snaps) if a.restore in s), None)
         if not target: print("✗ 해당 복구시점이 없습니다. 'phoenix'로 목록을 확인하세요."); return
-        if os.path.exists(DB): shutil.copy2(DB, DB+".before_restore")  # 현재 상태도 보존
+        # ★① 되살릴 시점을 먼저 열어본다 — 그 파일이 깨져 있으면, 옮겨 담는 순간
+        #     지금 멀쩡한 자료까지 깨진다. 확인 전에는 현재 파일을 절대 건드리지 않는다.
+        try:
+            db=json.load(open(os.path.join(PHOENIX,target),encoding='utf-8'))
+        except Exception as e:
+            print(f"✗ 그 시점의 자료를 읽을 수 없습니다({type(e).__name__}) — 복구하지 않았습니다.")
+            print("   현재 자료는 그대로입니다. 'phoenix' 로 다른 시점을 골라 주세요.")
+            return
+        # ★② 현재 상태 보존은 시각을 붙여 남긴다 — 이름이 고정이면 두 번 복구할 때
+        #     처음 보존본이 덮여, 되돌아갈 자리가 사라진다.
+        if os.path.exists(DB):
+            _bs=DB+".before_restore_"+datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            try: shutil.copy2(DB, _bs); print(f"   (복구 전 상태를 {os.path.basename(_bs)} 로 보관했습니다)")
+            except Exception as e:
+                print(f"✗ 복구 전 상태를 보관하지 못했습니다({type(e).__name__}) — 안전을 위해 중단합니다.")
+                return
         shutil.copy2(os.path.join(PHOENIX,target), DB)
-        db=json.load(open(DB,encoding='utf-8'))
         print(f"🔥 피닉스 복구 완료 — {target[3:-5]} 시점으로 되살아났습니다.")
         print(f"   교인 {len(db.get('교인',[]))}명 · 설교 {len(db.get('설교',[]))}편 · 재정 {len(db.get('재정',[]))}건 복구")
         return
@@ -3519,6 +4367,23 @@ def dashboard(a):
          "돌봄명단":care_names[:4],"새가족":newf,"연월":ym,"오늘":td.isoformat(),"요일":wk,
          "생일수":len(bdays),"오늘생일":[nm for d,nm,jk in bdays if d==0],
          "생일":[{"d":d,"이름":nm,"직분":jk} for d,nm,jk in bdays[:6]]}
+    # ★백업 상태 — 화면(웹)으로만 쓰시는 목사님께도 백업 알림이 닿도록 함께 내려보낸다.
+    #   (번호 메뉴에는 _backup_nudge 가 있으나 웹 화면에는 그 경로가 없었다)
+    try:
+        _bd=os.path.join(BASE,"_백업"); _days=None
+        if os.path.isdir(_bd):
+            _st=[f for f in os.listdir(_bd) if len(f)>=8 and f[:8].isdigit()]
+            if _st:
+                _s=max(_st)[:8]
+                _days=(td-_dt.date(int(_s[:4]),int(_s[4:6]),int(_s[6:8]))).days
+        out["백업경과일"]=_days                      # None = 한 번도 안 함
+        _bf2=_C.get("백업폴더")
+        out["백업폴더설정"]=bool(_bf2)
+        out["백업폴더없음"]=bool(_bf2) and not os.path.isdir(_bf2)
+        _ch=(_C.get("교회명") or "").strip()
+        out["첫설정필요"]=(not _C.get("첫설정완료")) and (_ch in ("","○○교회","OO교회","교회"))
+    except Exception:
+        pass
     print("__DASH__"+_j.dumps(out,ensure_ascii=False))
 def _congrats_pool():
     import json as _j
@@ -4658,6 +5523,8 @@ def main():
         sp.set_defaults(func=fn); return sp
     add("help",helpcmd)
     add("member-add",member_add,"name","sex","birth","birthtype","tel","addr","role","officedate","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","cycle","memo","date","family")
+    add("member-import",member_import,"file","sheet","dup","apply")
+    add("finance-import",finance_import,"file","sheet","year","shape","apply","allowneg")
     add("member-update",member_update,"name","sex","birth","birthtype","tel","addr","role","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","memo","date")
     add("card-vis",card_vis,"name","act")
     add("office-add",office_add,"name","role","memo","date")

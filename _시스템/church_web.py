@@ -25,6 +25,7 @@ C=cfg()
 ACTIONS=[
  # group, cmd, title, icon, fields[(name,label,placeholder,required)]
  ("목양","member-add","교우 등록·수정 & 조회 (한 카드로)","🙌",[("name","이름","",1),("role","직분 (권찰/집사/권사/안수집사/장로 등)","",0),("officedate","직분 임직·취임일 (직분 바뀔 때만)","",0),("cell","소속셀","",0),("leader","인도자","",0),("tel","연락처","",0),("addr","주소","",0),("birth","생년월일","",0),("birthtype","생일 양력/음력 (양력/음력)","",0),("marital","결혼 상태 (미혼/기혼/사별/이혼)","",0),("wedding","결혼기념일","",0),("edu","학력","",0),("job","직장","",0),("car","차량","",0),("baptismdate","세례일","",0),("catechism","학습일","",0),("infantbaptism","유아세례일","",0),("confirm","입교일","",0),("regpath","등록 경로 (초신자 등록/타교회 전입)","",0),("prevchurch","이전 교회","",0),("transferdate","전입일","",0),("family","가정 식구 (이름:관계 ; 로 구분 · 예: 김영희:아내; 홍길동:아들; 홍부모:부모)","",0),("memo","메모","",0)],"한 카드로 등록·수정·조회를 다 합니다. ▸이름만 넣고 실행 = 조회. ▸새 이름 + 필요한 칸 = 등록(모든 칸을 다 채울 필요 없습니다). ▸이미 등록된 교우 + 고칠 칸만 = 그 칸만 수정되고 나머지는 그대로 보존(안전). ▸직분을 새로 넣으면 '직분 연혁'으로 쌓이고 임직일을 함께 넣으면 그 날짜로 기록됩니다."),
+ ("목양","member-import","교인 명단 한 번에 등록 (엑셀·CSV) 📥","📥",[("file","엑셀·CSV 파일 (프로그램 폴더에 두고 파일 이름만 넣으셔도 됩니다)","교인명단.xlsx",1),("apply","실제로 등록 (확인 후 1 · 비워두면 미리보기)","",0),("dup","이미 등록된 분 (비우면 건너뜀 · 보완 = 빈 칸만 채움)","",0),("sheet","시트 이름 (여러 장일 때만)","",0)],"이미 엑셀·한글로 갖고 계신 교인 명단을 통째로 불러옵니다. 한 분씩 입력하지 않으셔도 됩니다. ▸열 제목이 '성명·휴대폰·구역'처럼 달라도 알아서 맞춰 드립니다(이름 칸만 있으면 됩니다). ▸처음 실행하면 '미리보기'라 자료가 바뀌지 않습니다 — 몇 명이 등록될지 먼저 확인하세요. ▸확인 후 '실제로 등록'에 1을 넣으면 등록되며, 그 직전에 자동으로 백업합니다. ▸이미 등록된 분은 기본적으로 건너뛰고, '보완'을 넣으면 비어 있는 칸만 채웁니다(기존 정보는 절대 덮어쓰지 않습니다)."),
  ("목양","member-card","교인 목양 카드 (인쇄용 한 장) 🪪","🪪",[("name","교인 이름","",1)],"바로 위 '교우 등록·수정 & 조회'에 담긴 모든 정보(생일 양/음·직분 연혁·성례·전교회·학력·직장 등)와 가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석까지 — 한 사람의 모든 것을 인쇄용 문서 한 장으로 만듭니다. 심방 전 파악용. ▸이름만 넣어 '조회'한 결과의 '📄 목양 카드 만들기' 버튼으로도 바로 만들 수 있습니다. (조회=화면 요약 / 이 카드=인쇄용 문서)"),
  ("목양","member-transfer","교적 이동(전입·전출·이명) + 대장","↔️",[("kind","종류(전입/전출/이명)","전출",0),("name","이름 (비우면 대장만 봅니다)","",0),("date","날짜","",0),("church","상대 교회","",0),("memo","사유","",0)],"이름을 넣으면 전입·전출·이명을 기록하고 교인 상태를 갱신하며, 항상 '교적 이동 대장'을 함께 출력합니다. 이름을 비우면 대장만 봅니다. 이명증서는 '증명서 발급'에서."),
  ("목양","visit-add","심방 센터 (브리핑·기록·현황·지침)","📝",[("name","이름 (비우면 심방 센터: 현황·지침 바로가기)","",0),("kind","구분(정기/춘계대심방/추계대심방/입원/새가족/구역)","정기",0),("word","전한 말씀(다녀와서 기록)","",0),("prayer","기도제목(;로 구분)","",0),("note","나눈 내용","",0),("followup","후속","",0)],"한 카드로 심방의 모든 것을 챙깁니다. ▸이름을 비우고 실행 = 심방 센터(대심방 현황·상황별 지침 바로가기 버튼). ▸이름만 넣고 실행 = 그 교우의 지난 말씀·기도제목 브리핑(반복 방지) + 대심방 현황·지침·목양 카드 버튼. ▸심방 다녀와서 '전한 말씀·기도제목·나눈 내용'을 채워 실행 = 기록."),
@@ -111,6 +112,7 @@ ACTIONS=[
  ("사역","presbytery-add","노회 관련","⛪",[("kind","구분(회의/서류/노회비)","회의",0),("note","내용","",1),("role","담당직무","",0),("due","기한","",0)]),
  ("선교","mission-field","선교 현지정보 시트","🗺️",[("title","선교 팀명","",1)],"선교사·숙소·식당·사역지 연락처와 일자별 장소 계획을 한 장으로 정리합니다."),
  ("재정","finance-add","재정 기록 & 요약 (수입/지출)","💵",[("kind","구분(수입/지출)","수입",0),("item","항목 — 수입:십일조·감사·선교·건축 / 지출:인건비·시설·공과금·행사","십일조",0),("name","교인(헌금자·선택)","",0),("dept","부서(선택·예: 선교부/교육부/찬양)","",0),("amount","금액(숫자만·비우면 요약 보기)","",0),("month","요약 볼 월(YYYY-MM·비우면 전체)","",0)],"금액을 넣으면 수입/지출을 기록하고(부서 넣으면 부서별 회계 집계), 금액을 비우면 재정 요약을 봅니다."),
+ ("재정","finance-import","재정 엑셀 가져오기 (재정부 엑셀 그대로) 💰","💰",[("file","재정 엑셀·CSV 파일 (프로그램 폴더에 두고 파일 이름만 넣으셔도 됩니다)","2026재정.xlsx",1),("apply","실제로 반영 (확인 후 1 · 비워두면 미리보기)","",0),("year","연도 (월별 결산표일 때 · 예: 2026)","",0),("sheet","시트 이름 (여러 장일 때만)","",0),("shape","모양 지정 (보통 비워두세요 · A=거래목록 B=월별집계 C=주간헌금)","",0)],"재정부가 엑셀로 정리하신 수입·지출을 그대로 불러옵니다. 세 가지 모양을 알아서 인식합니다 — ①날짜·적요·수입·지출 형태의 거래 장부 ②항목별 1월~12월 연간 결산표(연도를 함께 넣어 주세요) ③날짜별 십일조·감사헌금 등 주간 헌금 집계표. ▸'합계·소계' 줄은 자동으로 걸러냅니다. ▸금액은 1,200,000 · ₩ · 원 표기 모두 인식합니다. ▸처음 실행하면 미리보기라 자료가 바뀌지 않습니다 — 화면에 나온 수입·지출 합계가 장부와 맞는지 먼저 확인하세요. ▸확인 후 '실제로 반영'에 1을 넣으면 반영되며 그 직전 자동 백업합니다. ▸같은 파일을 다시 넣어도 이미 들어간 내역은 건너뛰므로 매달 갱신해 넣으셔도 안전합니다. ▸반영 후에는 연간 재정 총결산·항목별 통계·기부금영수증을 그대로 뽑으실 수 있습니다."),
  ("재정","finance-chart","재정 그래프·통계 📊","📊",[],"★재정을 그래프로 한눈에 — 월별 수입·지출 추이(막대), 헌금 종류·지출 항목 비중(도넛), 예산 대비 집행률(게이지), 부서별 집계. 전문 재정프로그램을 넘어서는 시각화 대시보드입니다."),
  ("재정","giving-ledger","교인별 헌금대장","🧾",[("name","교인(전체는 비움)","",0),("year","연도","",0)]),
  ("재정","donation-receipt","기부금영수증","🧧",[("name","교인","",1),("year","연도","2026",0)]),
@@ -627,12 +629,37 @@ function _setTx(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
 function _fmt(n){try{return (Number(n)||0).toLocaleString('ko-KR');}catch(e){return n;}}
 function briefBday(){runQuick('birthday',{days:'0'},'🌅 오늘 생일·기념일 축하');}
 function briefCare(){runQuick('care',{},'🧭 돌봄 필요 성도');}
+function goBackup(){runQuick('backup',{},'💾 자료 백업');}
+function goBackupSet(){
+ for(var i=0;i<A.length;i++){ if(A[i][1]==='set-backup'){ openM(A[i]); return; } }
+ runQuick('set-backup',{},'📦 USB 자동저장 설정');
+}
 function briefNew(){runQuick('newcomer',{},'🌱 새가족 정착 현황');}
 function brow(ic,cls,title,sub,badge,bcls,fn){
  return '<div class="brow" onclick="'+fn+'()"><div class="ic '+cls+'">'+ic+'</div><div class="tx"><b>'+esc(title)+'</b><s>'+esc(sub)+'</s></div><span class="bdg '+bcls+'">'+esc(badge)+'</span><span class="go2">→</span></div>';
 }
+function setupBanner(){
+ if(document.getElementById('setupbanner'))return;
+ var d=document.createElement('div'); d.id='setupbanner';
+ d.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:99998;background:#0f7b6c;color:#fff;padding:13px 18px;font-size:15px;box-shadow:0 -3px 12px rgba(0,0,0,.2);display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+ var t=document.createElement('span');
+ t.innerHTML='<b>처음 오셨군요.</b> 우리 교회 이름만 넣으시면 준비가 끝납니다 — 주보·증명서에 자동으로 들어갑니다.';
+ d.appendChild(t);
+ var go=document.createElement('button');
+ go.textContent='교회 이름 넣기';
+ go.style.cssText='margin-left:auto;background:#fff;color:#0f7b6c;border:0;border-radius:8px;padding:9px 18px;font-weight:700;font-size:15px;cursor:pointer';
+ go.onclick=function(){ for(var i=0;i<A.length;i++){ if(A[i][1]==='setup'){ openM(A[i]); return; } } };
+ d.appendChild(go);
+ var later=document.createElement('button');
+ later.textContent='나중에';
+ later.style.cssText='background:transparent;color:#fff;border:1px solid rgba(255,255,255,.6);border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer';
+ later.onclick=function(){d.parentNode.removeChild(d);};
+ d.appendChild(later);
+ document.body.appendChild(d);
+}
 function loadStats(){
  fetch('/stats').then(function(r){return r.json();}).then(function(s){
+  if(s['첫설정필요'])setupBanner();
   _setTx('st_mem',_fmt(s.교인)+'명');
   _setTx('st_visit',_fmt(s.이번주심방)+'회');
   _setTx('sb_visit',(s.돌봄필요?('돌봄 필요 '+s.돌봄필요+'명'):'이번 주 심방 기록'));
@@ -664,6 +691,46 @@ function runQuick(cmd,args,title){
   .catch(function(e){o.className='out on';o.textContent=isNet(e)?NETERR:'오류: '+e;});
 }
 loadStats();
+function updChime(){
+ try{
+  var C=window.AudioContext||window.webkitAudioContext; if(!C)return;
+  var a=new C(); var o=a.createOscillator(); var g=a.createGain();
+  o.connect(g); g.connect(a.destination); o.type='sine';
+  o.frequency.value=880; g.gain.value=0.04; o.start();
+  setTimeout(function(){try{o.frequency.value=1175;}catch(e){}},170);
+  setTimeout(function(){try{o.stop();a.close();}catch(e){}},400);
+ }catch(e){}
+}
+function updBanner(u){
+ if(document.getElementById('updbanner'))return;
+ var d=document.createElement('div'); d.id='updbanner';
+ d.style.cssText='position:fixed;left:0;right:0;top:0;z-index:99999;background:#1f6feb;color:#fff;padding:13px 18px;font-size:16px;font-weight:700;box-shadow:0 3px 12px rgba(0,0,0,.25);display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+ var t=document.createElement('span');
+ t.textContent='🔔 새 업데이트가 나왔습니다'+(u&&u.version?(' (v'+String(u.version).split(' ')[0]+')'):'');
+ d.appendChild(t);
+ if(u&&u.notes){
+  var n=document.createElement('span');
+  n.style.cssText='font-weight:400;font-size:14px;opacity:.95';
+  n.textContent=String(u.notes).slice(0,90);
+  d.appendChild(n);
+ }
+ var s=document.createElement('span');
+ s.style.cssText='font-weight:400;font-size:13px;opacity:.9';
+ s.textContent='교인·심방·재정 자료는 그대로 보존됩니다';
+ d.appendChild(s);
+ var go=document.createElement('button');
+ go.textContent='지금 업데이트';
+ go.style.cssText='margin-left:auto;background:#fff;color:#1f6feb;border:0;border-radius:8px;padding:9px 18px;font-weight:700;font-size:15px;cursor:pointer';
+ go.onclick=function(){updateApp();};
+ d.appendChild(go);
+ var later=document.createElement('button');
+ later.textContent='나중에';
+ later.style.cssText='background:transparent;color:#fff;border:1px solid rgba(255,255,255,.6);border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer';
+ later.onclick=function(){d.parentNode.removeChild(d);document.body.style.paddingTop='';};
+ d.appendChild(later);
+ document.body.appendChild(d);
+ document.body.style.paddingTop='62px';
+}
 function checkUpdate(){
  fetch('/updatecheck').then(function(r){return r.json();}).then(function(u){
   var b=document.querySelector('.upd');if(!b)return;
@@ -671,6 +738,7 @@ function checkUpdate(){
    b.classList.add('has-new');
    if(!b.querySelector('.updbadge')){var s=document.createElement('span');s.className='updbadge';s.textContent='NEW';b.appendChild(s);}
    b.title='새 업데이트'+(u.version?(' '+u.version.split(' ')[0]):'')+' 있음 — 눌러서 업데이트하세요'+(u.notes?(String.fromCharCode(10)+u.notes):'');
+   updBanner(u); updChime();
   }
  }).catch(function(){});
 }
@@ -694,6 +762,18 @@ function loadNotif(){
    items.push([e['중요']?'⭐':'🗓️',e['중요']?'bd':'vs',(e['날짜']===t0?'오늘 · ':(String(e['날짜']).slice(5)+' · '))+e['제목'],'일정 — 캘린더 보기','cal']);
   });
   if(up&&up['new'])items.push(['🔄','nw','새 업데이트 있음',(up.notes||'눌러서 업데이트'),'updateApp']);
+  var bkd=s['백업경과일'];
+  if(bkd===null||typeof bkd==='undefined'){
+   items.push(['💾','cr','자료 백업을 한 번도 안 하셨습니다','컴퓨터가 고장 나면 교적이 사라집니다 — 지금 한 번만 눌러 두세요','goBackup']);
+  }else if(bkd>=30){
+   items.push(['💾','cr','백업한 지 '+bkd+'일 지났습니다','1분이면 끝납니다 — 눌러서 지금 백업','goBackup']);
+  }
+  if(s['백업폴더없음']){
+   items.push(['⚠️','cr','USB 자동저장 폴더를 찾을 수 없습니다','USB가 빠졌거나 폴더가 없습니다 — 지금은 이중 보관이 안 되고 있습니다','goBackupSet']);
+  }
+  if(s['백업폴더설정']===false){
+   items.push(['🧷','vs','USB 자동저장이 설정되지 않았습니다','한 번 지정해 두시면 저장할 때마다 자동으로 이중 보관됩니다','goBackupSet']);
+  }
   var box=document.getElementById('notif_list'),dot=document.getElementById('notif_dot');if(!box)return;
   if(items.length){var Q=String.fromCharCode(39);box.innerHTML=items.map(function(it){return '<div class="notif-item" onclick="notifGo('+Q+it[4]+Q+')"><div class="ni-ic '+it[1]+'">'+it[0]+'</div><div class="ni-tx"><b>'+esc(it[2])+'</b><s>'+esc(it[3])+'</s></div></div>';}).join('');if(dot)dot.style.display='';}
   else{box.innerHTML='<div class="notif-empty">오늘은 새 알림이 없습니다. 평안한 하루 되세요.</div>';if(dot)dot.style.display='none';}
