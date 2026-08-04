@@ -452,7 +452,7 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
       <div class="ava" id="avatarInit">·</div>
       <div><b id="pastorName">__PASTOR__</b><small>담임 · __CHURCH__</small></div>
     </div>
-    <div class="credit" style="padding:11px 14px 14px;font-size:11.5px;line-height:1.6;color:var(--muted);border-top:1px solid var(--line-2)"><b style="color:var(--ink)">제작 · 저작권 ⓒ 2026 김용원 (세움교회)</b><br>목회 목적 사용 자유 · 무단 복제 · 재판매 금지</div>
+    <div class="credit" style="padding:11px 14px 14px;font-size:11.5px;line-height:1.6;color:var(--muted);border-top:1px solid var(--line-2)"><b style="color:var(--ink)">제작 · 저작권 ⓒ 2026 김용원</b><br>목회 목적 사용 자유 · 무단 복제 · 재판매 금지</div>
   </aside>
 
   <div class="main">
