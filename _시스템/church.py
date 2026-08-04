@@ -363,7 +363,7 @@ def member_list(a):
     if a.cell: ms=[m for m in ms if m["소속셀"]==a.cell]
     print(f"■ 교인 {len(ms)}명"+(f" (셀:{a.cell})" if a.cell else ""))
     for m in ms:
-        print(f"  #{m['id']:>3} {m['이름']:<8} {m['직분'] or '':<6} {m['소속셀'] or '':<8} 심방 {len(m['심방이력'])}회 {m['연락처']}")
+        print(f"  #{m['id']:>3} {(m['이름'] or '(이름 미입력)'):<8} {m['직분'] or '':<6} {m['소속셀'] or '':<8} 심방 {len(m['심방이력'])}회 {m['연락처']}")
 
 def member_show(a):
     db=load(); hit=find(db,a.name)
@@ -2385,7 +2385,7 @@ def weekly_brief(a):
         b=(m.get('생년월일') or '')[5:]
         if b and any(b==(td+_dt.timedelta(days=o)).isoformat()[5:] for o in range(7)): bd.append(f"{m['이름']}")
     L.append(f"· 이번주 생일: {', '.join(bd) if bd else '없음'}")
-    caren=[m['이름'] for m in act if (not m['심방이력']) or (_days_since(m['심방이력'][-1]['날짜']) or 0)>=90]
+    caren=[(m['이름'] or '(이름 미입력)') for m in act if (not m['심방이력']) or (_days_since(m['심방이력'][-1]['날짜']) or 0)>=90]
     L.append(f"· 돌봄 필요(심방 오래): {', '.join(caren[:10]) if caren else '없음'}")
     up=sorted([e for e in db.get("일정",[]) if e.get("날짜","")>=today()],key=lambda x:x["날짜"])[:5]
     if up: L.append("· 다가오는 일정: "+", ".join(f"{e['날짜']} {e.get('유형','')}{('·'+e['장소']) if e.get('장소') else ''}" for e in up))
@@ -2771,6 +2771,7 @@ def sermon_reuse(a):
     sermon(na)
 def newfamily_add(a):
     """새가족 등록 — 정착 관리 시작(인도자·첫방문·소속셀). 부흥 교회 뒷문 방지."""
+    if not (a.name or "").strip(): print("⚠ 새가족 이름을 입력해 주세요."); return
     db=load(); db["_seq"]+=1
     m={"id":db["_seq"],"이름":a.name,"성별":a.sex or "","생년월일":a.birth or "","연락처":a.tel or "",
        "주소":a.addr or "","직분":"새가족","세례":"","소속셀":a.cell or "","인도자":a.leader or "","등록일":a.date or today(),
@@ -4097,7 +4098,7 @@ def menu(a):
             # ★영문 오류를 그대로 내보이지 않는다 — 목사님이 당황하신다.
             #   무엇을 하시면 되는지만 한국어로 알려 드리고, 원문은 파일로 남긴다.
             _menu_error(c, e)
-VERSION="2026-08-01 (★목사님 편의 2가지: ①바탕화면 아이콘이 저절로 생깁니다 — 압축 풀고 시작 파일 한 번만 누르시면 끝, 「아이콘 만들기」를 따로 실행하지 않으셔도 됩니다. 교회 이름을 넣으시면 아이콘 이름도 바로 따라 바뀝니다 ②영문 오류를 화면에서 없앴습니다 — 문제가 생겨도 무엇 때문인지·무엇을 하시면 되는지 한국어로 알려드리고 자료는 안전하다고 분명히 말씀드립니다. 기술적인 내용은 _오류기록 파일로 남겨 담당자에게 보내실 수 있습니다[인터넷 끊김·문서 열려있음·파일 누락·저장공간 부족 등 상황별]. 화면·번호메뉴 양쪽 적용 / 안내문 문의처 문구 정정) / 이전(07-31): 교인 명단 일괄등록·재정 엑셀 가져오기·검수표 자동생성·백업 알림·USB 이중저장"
+VERSION="2026-08-04 (★안정화: 새가족 등록에 이름 확인을 넣었습니다 — 이름을 비운 채 등록되어 「교인 명단」·「주간 목회 브리핑」이 열리지 않던 문제를 고쳤습니다. 이름이 비어 있는 기록이 이미 있는 교회에서도 두 화면이 정상으로 열립니다) / 이전(08-01): 바탕화면 아이콘 자동 생성·오류 한국어 안내·사용설명서 개정 / 이전(07-31): 교인 명단 일괄등록·재정 엑셀 가져오기·검수표 자동생성"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
