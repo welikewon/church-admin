@@ -1,0 +1,4 @@
+# .gitignore 는 LF 로 고정한다 — CRLF 로 되쓰이면
+# _업데이트발행(자비스).py 의 GITIGNORE_CANON(LF) 과 바이트가 갈린다.
+# 내용은 같아도 "두 판이 같다"는 기계 증명이 깨진다. (CSO 2026-08-15 · master 재정 C3)
+.gitignore -text
