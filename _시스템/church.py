@@ -283,8 +283,32 @@ def _savedoc(d, out):
         print(f"✗ 문서가 실제로 저장되지 않았습니다(제목이 너무 길거나 경로 문제): {out}"); return False
     _openfile(out)
     return True
+def _hwp_running():
+    """한글(Hwp.exe)이 지금 켜져 있는가 — 켜져 있는 개수를 돌려준다(0이면 안 켜져 있음).
+       ★못 쟀으면 None 을 돌려준다. None 을 0으로 접지 마라 —
+       «못 쟀다»를 «없다»로 읽으면 저장 안 한 남의 한글 문서를 날린다."""
+    try:
+        import subprocess as _sp
+        r=_sp.run(["tasklist","/FI","IMAGENAME eq Hwp.exe","/NH","/FO","CSV"],
+                  capture_output=True,timeout=20)
+        if r.returncode!=0: return None
+        return (r.stdout or b"").count(b'"Hwp.exe"')   # 이름은 ASCII라 한글 코드페이지와 무관하게 센다
+    except Exception:
+        return None
 def _also_hwp(docx_path):
-    """docx를 한글(.hwp)로도 저장 — 한글(한컴오피스) 설치 시. 없으면 조용히 건너뜀."""
+    """docx를 한글(.hwp)로도 저장 — 한글(한컴오피스) 설치 시.
+       ★한글이 켜져 있으면 하지 않고 그 사실을 알려 드린다(변환이 한글을 강제로 닫기 때문이다).
+       한글이 안 깔려 있으면 조용히 건너뜀."""
+    _n=_hwp_running()
+    if _n is None:
+        print("   ※ 한글(.hwp)로도 저장하지 않았습니다 — 한글이 켜져 있는지 확인하지 못했습니다.")
+        print("      이 저장은 한글을 잠시 닫아야 하므로, 확인하지 못한 채로는 하지 않습니다.")
+        return None
+    if _n:
+        print(f"   ※ 한글(.hwp)로도 저장하지 않았습니다 — 한글이 지금 {_n}개 열려 있습니다.")
+        print("      이 저장은 한글을 모두 닫아야 진행됩니다. 작업 중인 문서를 저장하고 닫으신 뒤 다시 해 주세요.")
+        print("      (docx 문서는 이미 저장됐고, 한글에서 그대로 열립니다.)")
+        return None
     try:
         import win32com.client as w, subprocess
         try: subprocess.run(["taskkill","/F","/IM","Hwp.exe"],capture_output=True)
@@ -1135,8 +1159,18 @@ def lesson(a):
 
 # ───────── 명령: Excel 동기화 ─────────
 def export_excel(a):
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    # ★엑셀 부품(openpyxl)이 없으면 «아무 일도 안 일어난 것»처럼 보이던 자리 (2026-08-27 수리).
+    #   전에는 이 import 가 try 밖이라 예외가 그대로 위로 새어, 화면에 ★아무 문구도 안 떴다.
+    #   목사님은 "눌렀는데 반응이 없다"만 겪으셨다. 실패는 반드시 말을 해야 한다.
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError as e:
+        print("⚠ 엑셀 관리대장을 만들지 못했습니다 — 엑셀 파일을 만드는 부품(openpyxl)이 지금 쓰는 파이썬에 없습니다.")
+        print(f"  ({e})")
+        print("  바탕화면의 '교회행정 시작' 아이콘으로 프로그램을 켜 주세요 — 프로그램이 준비한 파이썬으로 실행되어 정상 동작합니다.")
+        print("  (교인·재정 자료는 그대로입니다. 이 카드만 실행되지 않았습니다.)")
+        return
     db=load()
     wb=openpyxl.Workbook();
     thin=Side(style='thin',color='BBBBBB'); bd=Border(thin,thin,thin,thin)
@@ -3083,7 +3117,22 @@ def hwp_convert(a):
                 if f.endswith(".docx"): allx.append(os.path.join(dp,f))
         allx.sort(key=lambda p:os.path.getmtime(p),reverse=True); targets=allx[:n]
     if not targets: print("변환할 docx 없음"); return
-    try: subprocess.run(["taskkill","/F","/IM","Hwp.exe"],capture_output=True)
+    # ★변환 전에 «한글이 켜져 있는지» 먼저 여쭙는다 (2026-08-27).
+    #   이 기능은 변환을 위해 한글을 강제로 닫는다. 예고 없이 닫으면 저장하지 않은 문서가 사라진다.
+    #   ⇒ 켜져 있으면 시작하지 않고, 무엇을 하시면 되는지 알려 드린 뒤 멈춘다.
+    _n=_hwp_running()
+    if _n is None:
+        print("⚠ 한글(.hwp) 변환을 시작하지 않았습니다 — 한글이 지금 켜져 있는지 확인하지 못했습니다.")
+        print("  이 기능은 변환을 위해 한글을 모두 닫습니다. 확인하지 못한 채로는 진행하지 않습니다.")
+        print("  한글 문서를 저장하고 모두 닫으신 뒤 다시 눌러 주세요.")
+        return
+    if _n:
+        print(f"⚠ 한글(.hwp) 변환을 시작하지 않았습니다 — 한글이 지금 {_n}개 열려 있습니다.")
+        print("  이 기능은 변환을 위해 한글을 모두 닫습니다 — 저장하지 않은 문서가 있으면 그대로 사라집니다.")
+        print("  한글에서 작업 중인 문서를 저장하고 모두 닫으신 뒤 다시 눌러 주세요.")
+        print("  (급하지 않으시면 docx 문서를 한글에서 그대로 여셔도 됩니다.)")
+        return
+    try: subprocess.run(["taskkill","/F","/IM","Hwp.exe"],capture_output=True)   # 여기까지 왔으면 열린 한글이 없다(위 게이트 통과) — 남은 잔여 프로세스 정리용
     except Exception: pass
     try: hwp=w.gencache.EnsureDispatch("HWPFrame.HwpObject")
     except Exception: print("✗ .hwp 변환은 Windows + 한글(한컴오피스) + pywin32 설치 필요. (docx는 한글에서 바로 열립니다)"); return
@@ -3118,6 +3167,14 @@ def print_file(a):
     """프린터 직접 출력 — 파일(docx/xlsx/pdf/hwp/pptx)을 기본 프린터로 전송. (Windows)"""
     p=a.file
     if not p or not os.path.exists(p): print("사용법: print-file --file \"파일경로\"  (또는 파일 열어 Ctrl+P)"); return
+    # ★폰에서 누르시면 인쇄하지 않고 ★문서를 드린다(오너 결정 2026-08-19).
+    #   폰 옆에는 프린터가 없고, 여기서 인쇄를 걸면 아무도 없는 사무실에서 종이만 나온다.
+    #   그래서 "기본 프린터로 보냈습니다"는 폰에서 ★거짓말이 된다 — 문구도 함께 바꾼다.
+    if os.environ.get("CHURCH_WEB")=="1" and os.environ.get("CHURCH_REMOTE")=="1":
+        _openfile(p)   # 표식만 나가고, 화면이 그것을 ★받기 번호표로 바꾼다
+        print(f"📄 문서를 내려받으실 수 있게 드립니다: {os.path.basename(p)}")
+        print("   인쇄는 사무실 컴퓨터에서 하십시오 — 폰에서는 받은 문서를 열어 보실 수 있습니다.")
+        return
     try: os.startfile(p,"print"); print(f"🖨️ 인쇄 전송: {os.path.basename(p)} → 기본 프린터")
     except Exception as e: print(f"✗ 인쇄 실패: {e}. 파일을 열어 Ctrl+P로 인쇄하세요.")
 def read_file(a):
@@ -3138,10 +3195,21 @@ def read_file(a):
     print(t[:3000]+("\n... (이하 생략, 전체는 파일에서)" if len(t)>3000 else ""))
 def ppt_lyrics(a):
     """찬양 가사 PPT — 예배 프로젝터용 파워포인트 슬라이드(등록곡 가사, 한 소절씩)."""
-    from pptx import Presentation
-    from pptx.util import Inches, Pt as PPt
-    from pptx.dml.color import RGBColor as PColor
-    from pptx.enum.text import PP_ALIGN
+    # ★침묵 제거만 한다 — 동작은 한 글자도 안 바뀐다 (2026-08-27 · master 판정 ①).
+    #   전에는 이 import 가 try 밖이라, 부품이 없는 컴퓨터에서는 예외가 그대로 위로 새어
+    #   화면에 ★아무 문구도 안 떴다(=«눌렀는데 반응이 없다»). `export_excel` 과 같은 병이다.
+    #   ★지금 이 PC 두 해석기에는 pptx 가 있어 «잠복»이지만, 배포판은 다른 목사님 PC 로 나간다.
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt as PPt
+        from pptx.dml.color import RGBColor as PColor
+        from pptx.enum.text import PP_ALIGN
+    except ImportError as e:
+        print("⚠ 찬양 가사 PPT를 만들지 못했습니다 — 파워포인트 파일을 만드는 부품(python-pptx)이 지금 쓰는 파이썬에 없습니다.")
+        print(f"  ({e})")
+        print("  바탕화면의 '교회행정 시작' 아이콘으로 프로그램을 켜 주세요 — 프로그램이 준비한 파이썬으로 실행되어 정상 동작합니다.")
+        print("  (찬양곡·가사 자료는 그대로입니다. 이 카드만 실행되지 않았습니다.)")
+        return
     import json as _j
     lib=_j.load(open(SONGLIB,encoding='utf-8')) if os.path.exists(SONGLIB) else []
     byn={re.sub(r'\s','',s['제목']):s for s in lib}
@@ -3233,7 +3301,9 @@ def sermon_files(a):
     if a.open:
         hit=[t for t in files if a.open in t[2]]
         if hit:
-            try: os.startfile(hit[0][1]); print(f"▶ 여는 중: {hit[0][2]}  (Word/한글에서 편집하세요)")
+            # ★_openfile() 을 태운다 — 화면에서 부르면 표식만 내고, ★폰이면 그 표식이 받기 번호표로 바뀐다.
+            #   직접 os.startfile 을 부르면 ★심방지에서 누르신 설교 문서가 아무도 없는 사무실 화면에서 열린다.
+            try: _openfile(hit[0][1]); print(f"▶ 여는 중: {hit[0][2]}  (Word/한글에서 편집하세요)")
             except Exception as e: print(f"✗ 열기 실패: {e} — 파일을 직접 더블클릭하세요")
         else: print(f"✗ '{a.open}' 관련 설교 파일 없음. 목록에서 확인하세요.")
         return
@@ -3260,6 +3330,21 @@ def _find_docs(kw, limit=20):
 def open_file(a):
     """파일 불러오기 — 프로그램·D백업·문서폴더에 저장된 파일을 이름으로 찾아 엽니다."""
     if a.file and (os.path.exists(a.file) or str(a.file).startswith(("shell:","http://","https://"))):
+        _remote=(os.environ.get("CHURCH_WEB")=="1" and os.environ.get("CHURCH_REMOTE")=="1")
+        # ★폰에서는 탐색기·웹주소를 열 수 없다(파일이 아니다). 사실대로 알린다 —
+        #   여기서 열면 아무도 없는 사무실 화면에만 창이 뜨고 폰은 "열었다"고 ★거짓말을 한다.
+        if _remote and not os.path.exists(a.file):
+            print("※ 이 항목은 사무실 컴퓨터에서만 열립니다(폴더·인터넷 주소는 폰으로 받을 수 없습니다).")
+            print(f"   위치: {a.file}")
+            return
+        # ★폰이면 _openfile 을 태운다 — 표식만 나가고 화면이 그것을 받기 번호표로 바꾼다.
+        #   ★사무실(PC)은 종전 그대로 os.startfile 이다. 위 print_file 과 ★같은 모양으로 둔다 —
+        #     바꾸라고 하신 것은 ★폰 동작이고, PC 는 ★건드리지 않는 것이 요청이었다.
+        #   (2026-08-20 master 재정 A5: 한때 PC 도 _openfile 로 태웠으나, 그러면 여는 주체가
+        #    자식에서 부모로 옮겨간다 — 요청 범위 밖이고 오너 화면을 띄우지 않고는 검증할 수도 없다.)
+        if _remote:
+            _openfile(a.file); print(f"▶ 여는 중: {os.path.basename(a.file) or a.file}")
+            return
         try: os.startfile(a.file); print(f"▶ 여는 중: {os.path.basename(a.file) or a.file}")
         except Exception as e: print(f"✗ 열기 실패: {e} — 파일을 직접 더블클릭하세요")
         return
@@ -3278,6 +3363,10 @@ def open_file(a):
                     seen.add(f.lower()); hits.append(os.path.join(dp,f))
     if not hits: print(f"✗ '{kw}' 관련 파일 없음"); return
     if len(hits)==1:
+        # ★위와 같은 갈래 — 폰이면 받기 번호표, 사무실이면 종전 그대로 연다.
+        if os.environ.get("CHURCH_WEB")=="1" and os.environ.get("CHURCH_REMOTE")=="1":
+            _openfile(hits[0]); print(f"▶ 여는 중: {os.path.basename(hits[0])}")
+            return
         try: os.startfile(hits[0]); print(f"▶ 여는 중: {os.path.basename(hits[0])}")
         except Exception: print(f"파일 위치: {hits[0]}")
         return
@@ -3293,6 +3382,13 @@ def open_folder(a):
     kind=(getattr(a,"kind",None) or "설교").strip()
     n=NMAP.get(kind,"09")
     folder=CAT(n)   # 설정 '아카이브루트' 있으면 실제 교회 원본 아카이브를 엶
+    # ★폴더는 ★내려받을 수 없다(파일이 아니다). 폰에서 부르시면 ★열지 않고 사실대로 알린다 —
+    #   여기서 열면 아무도 없는 사무실 컴퓨터에서 창만 열리고, 폰 화면은 "열었습니다"라고 ★거짓말을 한다.
+    if os.environ.get("CHURCH_WEB")=="1" and os.environ.get("CHURCH_REMOTE")=="1":
+        print("※ 폴더 열기는 사무실 컴퓨터에서만 됩니다 — 폰에서는 폴더를 열 수 없습니다.")
+        print(f"   폴더 위치: {folder}")
+        print("   폰에서는 문서를 만드는 카드를 쓰시면 그 자리에서 바로 받으실 수 있습니다.")
+        return
     try:
         os.startfile(folder); print(f"▶ '{os.path.basename(folder)}' 폴더를 탐색기로 열었습니다.\n   그 안에서 지난 파일들을 더블클릭해 여세요.")
     except Exception as e:
@@ -3335,7 +3431,8 @@ def song_sheet(a):
     if not hit: print(f"✗ '{a.title}' 곡 없음"); return
     p=hit[0].get("악보","")
     if p and os.path.exists(p):
-        try: os.startfile(p); print(f"▶ 악보 여는 중: {hit[0]['제목']}")
+        # ★_openfile() 을 태운다(위 sermon_files 와 같은 이유 — 폰에서는 받기 번호표가 된다)
+        try: _openfile(p); print(f"▶ 악보 여는 중: {hit[0]['제목']}")
         except Exception as e: print(f"✗ {e}")
     else: print(f"✗ '{hit[0]['제목']}' 악보 파일 없음 ('찬양곡·자작곡 등록'에서 악보를 함께 등록해 주세요)")
 # _IMPORT_ALIAS — 엑셀/CSV 열 이름이 교회마다 달라도 알아서 맞춘다(일괄 등록용)
@@ -3913,8 +4010,8 @@ def _update_alarm(upd):
         except Exception: pass
 
 
-def _cfg_set(key, val):
-    """설정 파일에 한 항목 저장(있으면 갱신).
+def _cfg_set(key, val, delete=False):
+    """설정 파일에 한 항목 저장(있으면 갱신). delete=True 면 그 항목을 ★지운다.
        ★반드시 파일을 다시 읽어서 갱신한다 — 메모리에 들고 있던 옛 설정으로 통째로 쓰면
        바로 직전에 다른 기능이 저장한 값(예: 방금 입력한 교회 이름)을 지워버린다."""
     try:
@@ -3932,15 +4029,349 @@ def _cfg_set(key, val):
                     print(f"⚠ 설정 파일을 읽지 못했습니다 — 이전 설정을 {os.path.basename(_bk)} 로 보관했습니다.")
                 except Exception:
                     print("⚠ 설정 파일을 읽지 못했습니다.")
-                print("   교회 이름·백업 폴더 설정을 다시 한 번 넣어 주세요. (교인·재정 자료와는 무관합니다)")
+                # ★사실대로 적는다 — 이 파일에는 폰 접속 비밀번호도 들어 있다.
+                #   "교인·재정과 무관"만 말하면 폰이 안 열리는 이유를 목사님이 영영 못 찾으신다.
+                print("   교회 이름·백업 폴더 설정을 다시 한 번 넣어 주세요.")
+                print("   ※ 교인·심방·재정 자료는 다른 파일에 있어 그대로 안전합니다.")
+                print("   ※ 다만 폰 접속 비밀번호는 이 파일에 있었으므로, 폰을 쓰고 계셨다면")
+                print("      「📱 폰 접속 설정」에서 비밀번호를 한 번 더 정해 주세요.")
                 c={}
         if not isinstance(c,dict): c={}
-        c[key]=val
-        json.dump(c, open(CONFIG,'w',encoding='utf-8'), ensure_ascii=False, indent=2)
+        if delete: c.pop(key,None)
+        else:      c[key]=val
+        # ★한 번에 바꿔치기한다 — 쓰다가 전원이 나가거나 화면 프로그램이 같은 순간 읽으면
+        #   반쪽짜리 설정 파일이 남고, 그러면 교회 이름·폰 비밀번호가 통째로 못 읽는 상태가 된다.
+        _tmp=CONFIG+".tmp"
+        with open(_tmp,'w',encoding='utf-8') as _f:
+            json.dump(c,_f,ensure_ascii=False,indent=2)
+            _f.flush(); os.fsync(_f.fileno())
+        os.replace(_tmp,CONFIG)
         _C.clear(); _C.update(c)
         return True
     except Exception:
         return False
+
+
+# ── 📱 폰 접속 비밀번호 ────────────────────────────────────────────────────
+#    설정 파일에는 **되돌릴 수 없는 형태(해시)로만** 저장한다. 설정 파일을 열어 보아도
+#    비밀번호를 알아낼 수 없어야 한다 — 교인 명부를 지키는 자물쇠이기 때문이다.
+PHONE_ITER=240000        # 해시 반복 횟수(높을수록 대입에 오래 걸린다)
+
+def _phone_hash(pw, salt=None, iters=PHONE_ITER):
+    """비밀번호 → 저장용 기록. 솔트(무작위 소금)를 함께 넣어 같은 비밀번호라도 매번 다른 값이 된다.
+       ★'세대'를 함께 넣는다 — 비밀번호를 바꾸면 이 숫자가 바뀌고, 화면 프로그램은 그 숫자가 달라진
+         로그인은 끊는다. 이게 없으면 ★비밀번호를 바꿔도 잃어버린 폰이 계속 들어온다
+         (이 프로그램과 화면 프로그램은 서로 다른 프로세스라, 여기서 저 쪽 기억을 직접 지울 수 없다.
+          그래서 '지우는' 대신 '세대가 다르면 무효'로 만든다)."""
+    import hashlib as _h
+    s=salt or os.urandom(16).hex()
+    v=_h.pbkdf2_hmac('sha256', (pw or "").encode('utf-8'), bytes.fromhex(s), iters).hex()
+    return {"알고리즘":"pbkdf2_sha256","반복":iters,"솔트":s,"해시":v,
+            "세대":datetime.datetime.now().timestamp(),
+            "설정시각":datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+def _phone_verify(pw, rec):
+    """입력한 비밀번호가 저장된 기록과 맞는지. 반복 횟수를 기록에서 읽으므로,
+       나중에 반복 횟수를 올려도 이미 정해 두신 비밀번호는 그대로 쓰인다."""
+    import hashlib as _h, hmac as _hm
+    try:
+        if not isinstance(rec,dict): return False
+        s=rec.get("솔트") or ""; want=rec.get("해시") or ""
+        if not s or not want: return False
+        it=int(rec.get("반복") or PHONE_ITER)
+        got=_h.pbkdf2_hmac('sha256', (pw or "").encode('utf-8'), bytes.fromhex(s), it).hex()
+        return _hm.compare_digest(got, want)
+    except Exception:
+        return False
+
+def _vpn_exe():
+    """사설망(VPN) 프로그램의 위치. 없으면 빈 문자열(= 아직 안 깔려 있다)."""
+    for d in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+              os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"):
+        try:
+            p=os.path.join(d,"Tailscale","tailscale.exe")
+            if os.path.exists(p): return p
+        except Exception: pass
+    return ""
+
+def _vpn_addr():
+    """폰에서 칠 ★사설망 주소 — (주소, 못 여는 사유). 목사님이 직접 IP를 찾아다니시게 하지 않기 위한 것이다.
+       ★2026-08-27: 이름만 `_phone_addr` → `_vpn_addr` 로 바꿨다(본문 무수정).
+         길이 둘(사설망·같은 와이파이)이 되었으므로 «폰 주소»라는 이름은 ★길을 고르는 함수가 가져간다.
+
+       ★여기서 알려 드리는 주소는 ★실제로 열리는 주소 하나뿐이어야 한다.
+         예전에는 공유기(랜) 주소도 함께 적어 드렸는데, 지금은 ★랜에는 아예 열지 않으므로
+         그 주소를 적으면 목사님이 폰에 쳐 넣고 안 열려 헛걸음하신다. 그래서 사설망 주소만 적는다.
+       ★고르는 규칙은 church_web.py 의 _phone_ip() 와 ★똑같아야 한다 — 한쪽만 고치지 마라.
+         (①프로그램에 직접 물어보기 → ②랜 카드 이름으로 지목 → ③못 찾으면 빈 값.
+          ★주소 숫자(100.으로 시작)로는 고르지 않는다 — 통신사가 쓰는 대역과 같아서
+          그 대역을 쓰는 집·교회에서는 엉뚱한 랜 카드를 사설망으로 착각한다.)
+       ★IPv4 만 쓴다(사설망은 IPv6 주소도 주지만 프로그램이 그쪽으로는 열지 않는다)."""
+    import subprocess
+    exe=_vpn_exe(); installed=bool(exe)
+    try:                       # ① 사설망 프로그램에 직접 물어본다
+        out=subprocess.run([exe or "tailscale","ip","-4"],capture_output=True,text=True,
+                           encoding='utf-8',errors='replace',timeout=10).stdout or ""
+        installed=True
+        m=re.search(r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s*$", out, re.M)
+        if m: return m.group(1), ""
+    except FileNotFoundError: pass
+    except Exception: pass
+    try:                       # ② 랜 카드 이름으로 지목
+        out=subprocess.run(["ipconfig"],capture_output=True,text=True,
+                           encoding='cp949',errors='replace',timeout=10).stdout or ""
+        cur=""
+        for ln in out.splitlines():
+            if ln.strip() and not ln.startswith(" "): cur=ln
+            elif "tailscale" in cur.lower():
+                m=re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", ln)
+                if m and ("IPv4" in ln or "IP Address" in ln or "주소" in ln):
+                    return m.group(1), ""
+    except Exception: pass
+    # ★church_web.py 의 _phone_ip() 에 ★같은 문장이 있다(이중 상수) — 한쪽만 고치지 마라.
+    if installed:              # ③ 사유를 갈라서 알려 드린다 — 하실 일이 서로 다르다
+        return "", "사설망(VPN)은 깔려 있지만 아직 연결되지 않았습니다 — 사설망 프로그램에서 로그인·연결을 마쳐 주세요."
+    return "", "사설망(VPN)이 아직 깔려 있지 않습니다 — 「📱 폰 접속 설정」 카드에 설치 순서가 적혀 있습니다."
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ★폰 접속 «길» 2가지 — 부채 4-2 이식분 (2026-08-27 · 오너 결정: 와이파이 먼저, 밖은 사설망)
+#   ★이 아래 세 조각(PHONE_WAY_DEFAULT · _phone_way · _is_lan_v4 · _lan_addr)은
+#     church_web.py 에 ★같은 규칙으로 한 벌 더 있다. 두 파일은 서로 import 하지 않기 때문이다.
+#     ⇒ 한쪽만 고치면 «카드에 적힌 주소»와 «실제로 열린 주소»가 어긋나 목사님이 헛걸음하신다.
+#     ⇒ 주석만으로는 안 지켜진다(2026-08-27 실증). ★기계 대조 시험으로 지킨다:
+#        시험대 `_실험/lane4_rule_parity.py` — 한쪽만 고치면 그 시험이 빨간불을 낸다.
+PHONE_WAY_DEFAULT="사설망"
+PHONE_WAYS=("사설망","와이파이","자동")
+LAN_SKIP_HINTS=("tailscale","vethernet","wsl","hyper-v","hyperv","virtualbox","vmware",
+                "loopback","bluetooth","docker","가상","tap-","openvpn","zerotier","teredo")
+
+def _phone_way():
+    """지금 고르신 폰 접속 방식. 설정에 없거나 모르는 값이면 ★기본값(사설망)으로 본다 —
+       설정 파일의 오타 하나로 와이파이가 조용히 열리는 일은 없어야 한다."""
+    w=(_C.get("폰접속방식") or "").strip()
+    return w if w in PHONE_WAYS else PHONE_WAY_DEFAULT
+
+def _is_lan_v4(ip):
+    """이 주소가 ★사설 대역(RFC1918)인가 — 10. / 172.16~31. / 192.168. 만 참이다.
+       ★공인(인터넷) 주소에는 어떤 경우에도 붙지 않는다 — 붙으면 세상 전체에 열린다.
+       ★100.64~100.127 은 여기서 ★거짓이다(통신사 대역과 같아 숫자만으로 '내 랜'이라 못 한다).
+       ★169.254(임시 자동 주소)도 거짓 — 폰이 그리로는 못 온다."""
+    try:
+        p=[int(x) for x in (ip or "").split(".")]
+    except Exception: return False
+    if len(p)!=4 or any(x<0 or x>255 for x in p): return False
+    if p[0]==10: return True
+    if p[0]==172 and 16<=p[1]<=31: return True
+    if p[0]==192 and p[1]==168: return True
+    return False
+
+def _lan_addr():
+    """폰이 들어올 ★같은 와이파이(사설 랜) 주소 — (주소, 못 여는 사유).
+       ①나가는 길의 내 주소를 운영체제에 물어본다(실제로 나가는 것은 없다)
+       →②안 되면 ipconfig 에서 가상 카드를 걸러내고 사설 대역 하나를 고른다
+       →③사설 대역이 아니면 ★버린다(공인 주소에 열면 세상 전체에 열린다)."""
+    import socket as _sk, subprocess
+    pub=""
+    try:
+        _s=_sk.socket(_sk.AF_INET,_sk.SOCK_DGRAM)
+        try:
+            _s.settimeout(1.0); _s.connect(("8.8.8.8",80)); ip=_s.getsockname()[0] or ""
+        finally:
+            try: _s.close()
+            except Exception: pass
+        if _is_lan_v4(ip): return ip,""
+        if ip and ip!="0.0.0.0" and not ip.startswith("127."): pub=ip
+    except Exception: pass
+    try:
+        out=subprocess.run(["ipconfig"],capture_output=True,text=True,
+                           encoding='cp949',errors='replace',timeout=10).stdout or ""
+        cur=""
+        for ln in out.splitlines():
+            if ln.strip() and not ln.startswith(" "): cur=ln.lower()
+            elif ("IPv4" in ln or "IP Address" in ln or "주소" in ln):
+                if any(h in cur for h in LAN_SKIP_HINTS): continue
+                m=re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", ln)
+                if m and _is_lan_v4(m.group(1)): return m.group(1),""
+    except Exception: pass
+    if pub:
+        return "", (f"이 컴퓨터가 공유기를 거치지 않고 인터넷에 바로 붙어 있습니다(주소 {pub}) — "
+                    "그 주소에는 열지 않습니다. 교회 공유기(와이파이·랜선)에 연결해 주세요.")
+    return "", ("같은 와이파이(랜) 주소를 찾지 못했습니다 — 이 컴퓨터가 교회 와이파이나 "
+                "랜선에 연결돼 있는지 확인해 주세요.")
+
+def _phone_addr():
+    """폰에서 칠 주소 — (주소, 못 여는 사유, ★어느 길인지). 길 = "vpn" · "wifi" · ""(없음).
+       ★church_web.py 의 `_phone_ip()` 와 ★똑같은 규칙이어야 한다 — 한쪽만 고치지 마라.
+         카드에 적힌 주소·방식과 실제로 열린 것이 어긋나면 목사님이 헛걸음하신다."""
+    way=_phone_way()
+    if way=="와이파이":
+        ip,why=_lan_addr()
+        return (ip,"","wifi") if ip else ("",why,"")
+    ip,vwhy=_vpn_addr()
+    if ip: return ip,"","vpn"
+    if way=="자동":
+        lip,lwhy=_lan_addr()
+        if lip: return lip,"","wifi"
+        return "", f"{vwhy} 그리고 {lwhy}", ""
+    return "",vwhy,""
+
+def _phone_status_lines():
+    """지금 상태 + 폰에서 칠 주소를 사람 말로."""
+    cur=_C.get("폰비밀번호") if isinstance(_C.get("폰비밀번호"),dict) else None
+    on=bool(_C.get("폰접속허용"))
+    L=["📱 폰 접속 설정","─"*36,
+       "  비밀번호 : "+(f"정해져 있습니다 ({cur.get('설정시각','')})" if cur else "아직 정하지 않으셨습니다"),
+       "  폰 접속  : "+("켜짐" if on else "꺼짐"),
+       "  로그인 유지: "+str(_C.get("폰세션유효일",30))+"일",
+       "  접속 방식  : "+_phone_way()+"   (사설망 = 밖에서도 / 같은 와이파이 = 교회·집 안에서만)",""]
+    if on and cur:
+        ip,why,mode=_phone_addr()
+        if ip:
+            L.append("  ▣ 폰 인터넷 창에 이 주소를 그대로 치세요 (즐겨찾기 해두시면 편합니다)")
+            # ★안내문 2벌 — 길마다 «어디서 되는가»가 정반대다. 한 문장으로 쓰면 하나는 거짓이 된다.
+            if mode=="wifi":
+                L.append(f"     http://{ip}:8899        ← 같은 와이파이 — ★교회·집의 그 와이파이 안에서만 됩니다")
+                L.append("       (폰이 같은 와이파이에 연결돼 있어야 합니다. 따로 설치하실 것은 없습니다.)")
+            else:
+                L.append(f"     http://{ip}:8899        ← 사설망 — 어디서나(밖에서도) 됩니다")
+        else:
+            L.append("  ▸ 지금은 폰에서 쓰실 주소가 없습니다.")
+            L.append(f"     {why}")
+            L.append("     ※ 공유기(같은 와이파이) 주소로는 열지 않습니다 — 그 길로는 비밀번호가")
+            L.append("       와이파이를 그대로 지나가기 때문입니다. 사설망으로만 열어 드립니다.")
+            # ★위 문구가 이 카드를 가리키므로, ★설치 순서가 이 카드 안에 실제로 있어야 한다.
+            #   바깥 문서를 가리키면 목사님이 그 파일을 찾아 헤매신다(master 판정 2026-08-15).
+            L.append("")
+            L.append("  ▣ 사설망(VPN) 설치 순서 — 한 번만 하시면 됩니다")
+            L.append("     ① 이 컴퓨터에서 tailscale.com 에 들어가 Windows 용을 내려받아 설치합니다.")
+            L.append("     ② 설치가 끝나면 구글 계정 등으로 로그인합니다(무료 요금제로 충분합니다).")
+            L.append("     ③ 폰에도 같은 앱(Tailscale)을 설치하고 ★같은 계정으로 로그인합니다.")
+            L.append("     ④ 이 프로그램을 껐다 켜시면, 이 자리에 폰에서 칠 주소가 나타납니다.")
+            L.append("     ⑤ 그 주소를 폰 인터넷 창에 치고 비밀번호를 한 번 넣으시면 끝입니다.")
+            L.append("     ※ 설치는 목사님(또는 담당자)이 직접 하셔야 합니다 — 프로그램이 대신 깔지 않습니다.")
+        L.append("")
+        L.append("  ※ 이 주소는 프로그램이 켜져 있을 때만 열립니다 — 사무실 컴퓨터를 켜 두세요.")
+        if ip:
+            # ★폰에서 안 열리는 가장 흔한 이유가 방화벽이다. 처음 켤 때 윈도우가 띄우는
+            #   '허용하시겠습니까' 창에서 '취소'를 누르시면, 프로그램은 정상으로 보이는데
+            #   ★폰 쪽만 조용히 막힌다. 화면 어디에도 안 적어 두면 원인을 찾으실 길이 없다.
+            L.append("")
+            L.append("  ▸ 폰에서 이 주소가 안 열린다면")
+            L.append("     ① 폰이 사설망(VPN)에 연결돼 있는지 먼저 보세요(폰에서도 켜져 있어야 합니다).")
+            L.append("     ② 그래도 안 되면 ★윈도우 방화벽입니다 — 처음 켤 때 뜬 '허용' 창에서")
+            L.append("        '취소'를 누르셨으면 폰 쪽만 막힙니다.")
+            L.append("        [윈도우 검색 → '방화벽을 통해 앱 허용'] 에서 python 항목의 '개인'에 체크해 주세요.")
+            L.append("     ③ 주소는 위 한 줄 그대로, http:// 부터 :8899 까지 다 넣으셔야 합니다.")
+    return L
+
+def phone_setup(a):
+    """📱 폰 접속 설정 — 폰에서 들어올 때 물어볼 비밀번호 하나를 정하고, 폰 접속을 켜고 끕니다.
+       ▸다 비우고 실행하면 지금 상태와 폰에서 칠 주소를 봅니다.
+       ▸'비밀번호' 칸에 넣으면 설정(또는 변경)됩니다.
+       ▸'폰 접속' 칸에 켜기/끄기 를 넣으면 열고 닫습니다(비밀번호를 정하신 뒤에만 켜집니다).
+       설정 파일에는 되돌릴 수 없는 형태로만 저장되어, 파일을 열어도 비밀번호는 보이지 않습니다."""
+    pw=(getattr(a,"pw","") or "").strip()
+    pw2=(getattr(a,"pw2","") or "").strip()
+    on=(getattr(a,"on","") or "").strip()
+    out=(getattr(a,"logoutall","") or "").strip()
+    cur=_C.get("폰비밀번호") if isinstance(_C.get("폰비밀번호"),dict) else None
+    did=False
+
+    if pw:
+        if len(pw)<6:
+            print("⚠ 비밀번호가 너무 짧습니다 — 6자 이상으로 정해 주세요.")
+            print("   교인 명부·심방 기록을 지키는 자물쇠라 조금 길수록 안전합니다."); return
+        if pw2 and pw!=pw2:
+            print("⚠ 두 번 넣으신 비밀번호가 서로 다릅니다. 다시 한 번 넣어 주세요."); return
+        if pw.lower() in ("123456","000000","111111","abcdef","qwerty","password","aaaaaa"):
+            print("⚠ 너무 흔한 비밀번호입니다 — 다른 것으로 정해 주세요."); return
+        if not _cfg_set("폰비밀번호", _phone_hash(pw)):
+            print("⚠ 설정을 저장하지 못했습니다. 잠시 뒤 다시 해보세요."); return
+        # ★비밀번호를 바꾸면 그 순간부터 이전 로그인은 전부 무효다.
+        #   세대(해시 안)와 무효화 시각, ★두 장치를 함께 민다 — 하나가 어떤 이유로 안 걸려도
+        #   나머지 하나가 잡는다. 폰을 잃어버리셨을 때 목사님이 하실 수 있는 유일한 조치라서
+        #   여기서 실패하면 안 된다.
+        _cfg_set("폰세션무효화", datetime.datetime.now().timestamp())
+        print("✅ 폰 접속 비밀번호를 "+("바꿨습니다." if cur else "정했습니다."))
+        if cur:
+            print("   ★지금까지 폰에서 로그인해 두신 것은 모두 끊겼습니다 — 새 비밀번호로 다시 들어오셔야 합니다.")
+            print("     (폰을 잃어버리셨을 때 비밀번호만 바꾸시면 되도록 이렇게 해 두었습니다)")
+        print("   폰에서 처음 들어올 때 한 번만 넣으시면, 그 뒤로는 계속 열립니다"
+              f"(약 {_C.get('폰세션유효일',30)}일).")
+        print("   ※ 비밀번호는 되돌릴 수 없는 형태로 저장되어, 설정 파일을 열어도 보이지 않습니다.")
+        print("   ※ 잊으셨을 때는 이 카드에서 새 비밀번호를 다시 정하시면 됩니다.")
+        cur=_C.get("폰비밀번호"); did=True
+
+    if out in ("1","예","네","실행","로그아웃"):
+        # 폰을 잃어버리셨을 때 — 폰·바깥 기기의 로그인만 전부 끊는다.
+        # ★사무실 컴퓨터 로그인은 끊지 않는다(이 컴퓨터에서만 얻는 열쇠로 만들어진 것이라
+        #   잃어버린 폰과 함께 끊을 이유가 없다). 가장 당황하신 순간에 보고 계신 화면까지
+        #   잃으시면 안 된다. 실제 판정은 church_web.py 의 세션 대조가 remote 에만 건다.
+        _cfg_set("폰세션무효화", datetime.datetime.now().timestamp())
+        print("✅ 폰·바깥 기기의 로그인을 모두 끊었습니다.")
+        print("   폰에서 다시 들어오시려면 비밀번호를 한 번 더 넣으시면 됩니다.")
+        print("   ※ 지금 보고 계신 이 사무실 화면은 그대로 쓰실 수 있습니다 — 끊기지 않습니다.")
+        print("     (사무실 컴퓨터 로그인은 이 컴퓨터에서만 얻는 열쇠로 만들어진 것이라,")
+        print("      잃어버린 폰과 함께 끊지 않습니다.)")
+        did=True
+
+    if on:
+        want = on in ("켜기","켬","on","1","열기","허용")
+        if want and not cur:
+            print("⚠ 먼저 비밀번호를 정해 주세요 — 비밀번호 없이는 폰 접속을 열지 않습니다.")
+            print("   같은 와이파이에 있는 누구나 교인 명부를 볼 수 있게 되기 때문입니다.")
+            print("   이 카드의 '비밀번호' 칸에 원하시는 비밀번호를 넣고 실행해 주세요."); return
+        if not want and on not in ("끄기","끔","off","0","닫기","차단"):
+            print("⚠ '켜기' 또는 '끄기' 로 넣어 주세요."); return
+        # ★끄실 때는 값을 false 로 남기지 않고 ★항목 자체를 지운다.
+        #   '꺼짐'을 나타내는 방법이 둘(항목 없음 / false)이면, 언젠가 한쪽만 검사하는 코드가 생긴다.
+        #   꺼짐은 ★항목 없음 하나로만 둔다 — 판정하는 길이 하나면 어긋날 자리가 없다.
+        if want: _cfg_set("폰접속허용", True)
+        else:    _cfg_set("폰접속허용", None, delete=True)
+        if want:
+            print("✅ 폰 접속을 켰습니다.")
+            print("   ★프로그램을 한 번 껐다 켜 주세요 — 그때부터 폰에서 들어오실 수 있습니다.")
+        else:
+            print("✅ 폰 접속을 껐습니다.")
+            print("   ★프로그램을 한 번 껐다 켜시면 완전히 닫힙니다.")
+        did=True
+
+    # ★접속 방식 고르기 — 부채 4-2 이식분 (2026-08-27 · 오너 결정 «와이파이 먼저, 밖은 사설망»)
+    #   ★기본값은 "사설망" 이다. 업데이트만 하신 분의 설정은 ★손대지 않는다 —
+    #     비워 두면 지금 방식 그대로다. 와이파이는 ★직접 고르셔야 열린다.
+    way=(getattr(a,"way","") or "").strip()
+    if way:
+        _alias={"와이파이":"와이파이","wifi":"와이파이","같은 와이파이":"와이파이","랜":"와이파이",
+                "사설망":"사설망","vpn":"사설망","자동":"자동","auto":"자동"}
+        pick=_alias.get(way.lower(), _alias.get(way,""))
+        if not pick:
+            print("⚠ 접속 방식은 '와이파이' 또는 '사설망' (또는 '자동') 으로 넣어 주세요.")
+            print("   와이파이 = 교회·집의 같은 와이파이 안에서만 됩니다(따로 설치할 것 없음).")
+            print("   사설망   = 밖에서도 됩니다(사설망 프로그램 설치·로그인이 필요합니다)."); return
+        if not _cfg_set("폰접속방식", pick):
+            print("⚠ 설정을 저장하지 못했습니다. 잠시 뒤 다시 해보세요."); return
+        print(f"✅ 폰 접속 방식을 「{pick}」 으로 정했습니다.")
+        if pick=="와이파이":
+            print("   ★교회·집의 ★같은 와이파이에 연결된 폰에서만 열립니다 — 밖에서는 안 됩니다.")
+            print("   ★로그인할 때 비밀번호가 그 와이파이를 지나갑니다. 카페·공항 같은 공용 와이파이에서는 쓰지 마세요.")
+        elif pick=="사설망":
+            print("   ★밖에서도(심방지·이동 중) 열립니다. 폰에도 사설망이 연결돼 있어야 합니다.")
+        else:
+            print("   ★사설망을 먼저 찾고, 없으면 같은 와이파이로 엽니다.")
+        print("   ★프로그램을 한 번 껐다 켜 주세요 — 그때부터 새 방식으로 열립니다.")
+        did=True
+
+    if did: print()
+    for ln in _phone_status_lines(): print(ln)
+    if not did:
+        if not cur:
+            print("  ▸ 이 카드의 '비밀번호' 칸에 원하시는 비밀번호를 넣고 실행하시면 정해집니다.")
+            print("  ▸ 비밀번호를 정하기 전에는 폰 접속이 열리지 않습니다(안전장치).")
+        elif not _C.get("폰접속허용"):
+            print("  ▸ '폰 접속' 칸에 켜기 를 넣고 실행하시면 폰에서 들어오실 수 있습니다.")
+        else:
+            print("  ▸ 바꾸시려면 '비밀번호' 칸에 새 비밀번호를 넣고 실행하세요.")
+        print("  ※ 사무실 컴퓨터에서 쓰실 때는 비밀번호를 묻지 않습니다 — 지금까지와 똑같습니다.")
 
 
 def _first_run_wizard():
@@ -4052,6 +4483,7 @@ def menu(a):
         print(" 13 집회일정   14 학생등록    15 시험응원   16 선교준비")
         print(" 17 설교이력   18 설교작성    19 지난설교 재생성")
         print(" 20 기능요청   21 교인 일괄등록(엑셀 명단)   22 재정 엑셀 가져오기")
+        print(" 23 📱 폰 접속 설정 (핸드폰으로 보기)")
         print(" 77 피닉스복구  88 자료백업   99 업데이트")
         print("  0 종료")
         c=ask("번호 선택> ")
@@ -4089,6 +4521,10 @@ def menu(a):
                 finance_import(NS(file=ask("재정 엑셀·CSV 파일: "),sheet="",shape="",
                                   year=ask("연도(월별 결산표일 때만 · 예 2026, 아니면 엔터): "),
                                   apply=(ask("실제로 반영할까요? (미리보기=엔터 / 반영=1): ") or "")))
+            elif c=="23":
+                print("  ※ 그냥 엔터만 누르시면 지금 상태와 폰에서 칠 주소를 보여 드립니다.")
+                phone_setup(NS(pw=ask("새 비밀번호(6자 이상 · 그대로 두려면 엔터): "),pw2="",
+                               on=ask("폰 접속 (켜기/끄기 · 그대로 두려면 엔터): "),logoutall=""))
             elif c=="88": backup(NS())
             elif c=="99":
                 if upd: update(NS(file=upd[1])); print("  ✅ 업데이트 완료! 교인·설교 등 자료는 영구 보존되었습니다. 프로그램을 다시 실행하세요.")
@@ -4098,7 +4534,7 @@ def menu(a):
             # ★영문 오류를 그대로 내보이지 않는다 — 목사님이 당황하신다.
             #   무엇을 하시면 되는지만 한국어로 알려 드리고, 원문은 파일로 남긴다.
             _menu_error(c, e)
-VERSION="2026-08-04 (★안정화: 새가족 등록에 이름 확인을 넣었습니다 — 이름을 비운 채 등록되어 「교인 명단」·「주간 목회 브리핑」이 열리지 않던 문제를 고쳤습니다. 이름이 비어 있는 기록이 이미 있는 교회에서도 두 화면이 정상으로 열립니다) / 이전(08-01): 바탕화면 아이콘 자동 생성·오류 한국어 안내·사용설명서 개정 / 이전(07-31): 교인 명단 일괄등록·재정 엑셀 가져오기·검수표 자동생성"
+VERSION="2026-08-27 (★폰 접속이 두 갈래가 되었습니다 — ①「같은 와이파이」로 여시면 교회·집의 그 와이파이 안에서 따로 설치하실 것 없이 바로 열리고, ②「사설망」으로 여시면 심방 길·이동 중 밖에서도 열립니다. 「📱 폰 접속 설정」의 '접속 방식' 칸에서 고르십니다 — 비워 두시면 지금 쓰시던 방식 그대로입니다. 화면과 카드에 ★어느 길로 열렸는지·어디서 되는지를 나눠 적어 드립니다) / 함께 고친 것: 엑셀 관리대장·찬양 가사 PPT가 안 될 때 아무 말 없이 멈추던 것을 ★무엇이 없어서인지 한국어로 알려 드리도록 · 한글(.hwp) 변환이 열려 있는 한글 창을 예고 없이 닫던 것을 ★열려 있으면 시작하지 않고 먼저 알려 드리도록 · 시작 아이콘이 컴퓨터의 파이썬을 모두 끄던 것을 ★이 프로그램 것만 정리하도록 / 이전(08-17): 핸드폰에서도 그대로 쓰실 수 있습니다 / 이전(08-04): 새가족 등록에 이름 확인 / 이전(08-01): 바탕화면 아이콘 자동 생성·오류 한국어 안내"
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
@@ -4147,6 +4583,26 @@ def version(a):
     ph=len([f for f in os.listdir(PHOENIX) if f.startswith("db_")]) if os.path.isdir(PHOENIX) else 0
     print(f"  🔥 피닉스 복구 — 실수로 자료가 지워져도 언제든 되살아납니다. (복구지점 {ph}개 보관 중)")
     print("      복구:  python church.py phoenix   (지점 확인) →  phoenix --last  (즉시 복구)")
+AUTH_KEYS=("폰세션","폰세션무효화","폰비밀번호")   # 폰 접속 자물쇠 — 백업 사본에는 넣지 않는다
+
+def _copy_cfg_clean(dst):
+    """설정 파일을 백업·USB 로 복사할 때 ★폰 접속 자물쇠만 빼고 복사한다.
+
+       ★왜 빼는가: 백업본은 USB·외장 드라이브로 나가고, 되돌리기 위해 나중에 그대로 복원된다.
+         · 로그인 기록이 복원으로 되살아나면, 폰을 잃어 '모든 기기 로그아웃'을 누르신 것이
+           ★없던 일이 된다 — 그 기능이 존재할 이유가 사라진다.
+         · 비밀번호까지 함께 빼면 ★복원 뒤에는 폰 접속이 저절로 닫힌다. 비밀번호를 다시 정하셔야 열린다.
+           복원은 '뭔가 잘못됐을 때' 하는 일이니 ★닫힌 채로 시작하는 것이 안전한 기본값이다.
+       교인·심방·재정 자료와 교회 이름·백업 폴더 등 나머지 설정은 ★그대로 백업된다."""
+    import json as _j
+    try:
+        c=_j.load(open(CONFIG,encoding='utf-8'))
+        if not isinstance(c,dict): raise ValueError
+        for k in AUTH_KEYS: c.pop(k,None)
+        _j.dump(c, open(dst,'w',encoding='utf-8'), ensure_ascii=False, indent=2); return True
+    except Exception:
+        return False
+
 def backup(a):
     """자료 백업 — 모든 데이터 + 내자료를 날짜 폴더에 복사(업데이트·오작동 대비)."""
     import shutil, datetime
@@ -4154,11 +4610,17 @@ def backup(a):
     bdir=os.path.join(BASE,"_백업",stamp); os.makedirs(bdir,exist_ok=True)
     for f in ("church_db.json","church_config.json"):
         p=os.path.join(BASE,f)
-        if os.path.exists(p): shutil.copy2(p,os.path.join(bdir,f))
+        if not os.path.exists(p): continue
+        if f=="church_config.json" and _copy_cfg_clean(os.path.join(bdir,f)): continue
+        shutil.copy2(p,os.path.join(bdir,f))
     nd=os.path.join(BASE,"_내자료")
     if os.path.isdir(nd): shutil.copytree(nd,os.path.join(bdir,"_내자료"),dirs_exist_ok=True)
     print(f"✅ 백업 완료: {bdir}")
     print("  (교인·심방·설교·재정·예화·주석·찬양곡 전부 · 업데이트해도 안전)")
+    if _C.get("폰비밀번호"):
+        print("  ※ 폰 접속 비밀번호·로그인 기록은 백업에 넣지 않습니다(안전을 위해).")
+        print("     나중에 이 백업으로 되돌리시면 폰 접속은 닫힌 상태로 시작되고,")
+        print("     「📱 폰 접속 설정」에서 비밀번호를 다시 정하시면 열립니다.")
     return bdir
 def _upd_fetch(base, rel, timeout=25):
     """업데이트 소스(base=URL 또는 로컬폴더)에서 rel 파일을 바이트로 가져온다. http(s)면 다운로드, 아니면 로컬 읽기."""
@@ -4305,8 +4767,13 @@ def set_backup(a):
     import json as _j, types
     path=(getattr(a,'path','') or getattr(a,'to','') or "").strip()
     if path:   # 폴더 설정
-        cfg=dict(_C); cfg["백업폴더"]=path
-        _j.dump(cfg,open(CONFIG,'w',encoding='utf-8'),ensure_ascii=False,indent=2); _C["백업폴더"]=path
+        # ★설정은 반드시 _cfg_set 으로 저장한다 — 메모리에 들고 있던 옛 설정을 통째로 쓰면
+        #   프로그램이 뜰 때 설정 파일을 못 읽었을 경우(잠김·손상) 기본 두 항목만 남고
+        #   업데이트주소·숨긴카드·아카이브루트·노트북맵·폰 비밀번호가 ★한꺼번에 사라진다.
+        #   같은 파일의 _cfg_set 이 그 규약을 이미 문서화해 두었는데 여기만 그 밖에 있었다.
+        if not _cfg_set("백업폴더", path):
+            print("⚠ 설정을 저장하지 못했습니다 — 폴더는 만들었지만 자동저장 설정은 남지 않았습니다.")
+            print("   프로그램을 껐다 켜신 뒤 다시 한 번 넣어 주세요."); return
         try: os.makedirs(path,exist_ok=True)
         except Exception: pass
         print(f"✅ USB·D 자동저장 폴더 설정 완료: {path}")
@@ -4329,7 +4796,10 @@ def sync_out(a):
     for f in ("church_db.json","church_config.json"):
         p=os.path.join(BASE,f)
         if os.path.exists(p):
-            try: shutil.copy2(p,os.path.join(dest,f)); n+=1
+            try:
+                # 설정은 폰 로그인 기록을 뺀 사본으로 — USB 로 로그인 기록이 따라 나가면 안 된다
+                if f=="church_config.json" and _copy_cfg_clean(os.path.join(dest,f)): n+=1
+                else: shutil.copy2(p,os.path.join(dest,f)); n+=1
             except Exception: pass
     nd=os.path.join(BASE,"_내자료")
     if os.path.isdir(nd):
@@ -4710,7 +5180,7 @@ def manual(a):
       "‘★ 교회행정 시작 (여기를 더블클릭).bat’ 을 더블클릭하면 브라우저에 예쁜 화면이 열립니다 — 카드를 눌러 사용하세요.",
       "‘(참고) 번호 메뉴로 시작.bat’ 은 번호를 눌러 쓰는 간단 메뉴입니다(컴퓨터가 익숙지 않으셔도 OK).",
       "처음 한 번: _시스템\\church_config.json 을 메모장으로 열어 우리 교회명·담임명을 넣고 저장.",
-      "준비물: 파이썬과 필요한 라이브러리(python-docx·openpyxl·python-pptx)는 배포판에 이미 포함되어 있어 따로 설치하지 않으셔도 됩니다. (한글 .hwp 변환만 한컴오피스가 설치된 PC에서 가능)",
+      "준비물: 파이썬과 필요한 라이브러리(python-docx·openpyxl·python-pptx·pywin32)는 배포판에 이미 포함되어 있어 따로 설치하지 않으셔도 됩니다. (한글 .hwp 변환은 한컴오피스가 설치된 PC에서 가능)",
       "💻 윈도우(Windows) 컴퓨터용입니다 — 맥(Mac)에서는 실행되지 않습니다. 윈도우 10·11이면 그대로 쓰실 수 있습니다.",
       "처음 켤 때 ‘Windows의 PC 보호 / SmartScreen’ 창이 뜰 수 있습니다 → 「추가 정보」를 누르시면 「실행」 버튼이 나타납니다. 인터넷으로 받은 처음 보는 프로그램이라 윈도우가 조심하는 것일 뿐, 자료는 목사님 컴퓨터 밖으로 나가지 않습니다.",
       "★ 바탕화면 아이콘은 저절로 생깁니다 — 시작 파일을 한 번 누르시면 바탕화면에 아이콘이 만들어지고, 다음부터는 그 아이콘만 누르시면 됩니다(따로 실행하실 파일이 없습니다).",
@@ -4793,7 +5263,11 @@ def manual(a):
       "이 프로그램은 ‘우리 교회 이름’과 ‘담임 목사님 성함’을 한 번만 넣어두면, 이후 만드는 모든 문서·주보·증명서·축하 문자에 그 이름이 자동으로 들어갑니다.",
       "◆ 가장 쉬운 방법 — 이대로만 하세요:",
       "  1) 프로그램을 켭니다(‘★ 교회행정 시작’ 파일 더블클릭).",
-      "  2) 왼쪽 메뉴에서 ‘시스템’을 누르고, 맨 위의 ‘⛪ 우리 교회 이름 설정’ 카드를 누릅니다.",
+      # ★설명서는 컴퓨터에서도 핸드폰에서도 읽으신다 — 화면마다 있는 것이 다르므로 둘 다 적는다.
+      #   (컴퓨터 화면은 왼쪽 메뉴, 핸드폰 화면은 아래 「☰ 분류」다. 한쪽만 적으면 다른 쪽에서는
+      #    없는 것을 찾으시게 된다.)
+      "  2) ‘시스템’ 분류에서 맨 위의 ‘⛪ 우리 교회 이름 설정’ 카드를 누릅니다.",
+      "     — 컴퓨터에서는 ‘왼쪽 메뉴’에서, 핸드폰에서는 화면 아래 ‘☰ 분류’에서 ‘시스템’을 고르시면 됩니다.",
       "  3) ‘우리 교회 이름’ 칸에 교회 이름을(예: 은혜교회), ‘담임 목사님 성함’ 칸에 성함을(예: 홍길동 목사) 적고 아래 ‘실행’ 버튼을 누릅니다.",
       "  4) 끝입니다! 프로그램을 껐다 다시 켜면 화면과 모든 문서에 우리 교회 이름이 나옵니다.",
       "※ 위쪽 검색창에 ‘교회 이름’이라고 쳐도 이 카드를 바로 찾을 수 있습니다.",
@@ -4903,7 +5377,8 @@ def manual(a):
       "  예산 편성 팁: 항목명을 ‘헌금·지출 항목표’와 똑같이(예: 십일조, 인건비(사례비)) 쓰면 실제 기록과 정확히 대조됩니다."]),
      ("⑥ 출력·파일",[
       "한글(.hwp) 변환: 만든 docx를 네이티브 한글파일로 — 한컴오피스가 설치된 PC에서만 됩니다(안 되어 있어도 docx는 한글에서 그대로 열립니다)",
-      "프린터 출력: 파일을 기본 프린터로 직접 인쇄 / 엑셀 관리대장 · 찬양 가사 PPT",
+      "  ⚠ 이 카드는 변환을 위해 한글(HWP)을 잠시 닫아야 합니다. 그래서 ★한글이 열려 있으면 시작하지 않고 «지금 한글이 몇 개 열려 있습니다»라고 알려 드린 뒤 멈춥니다(2026-08-27부터). 작업 중인 한글 문서를 저장하고 모두 닫으신 뒤 다시 눌러 주세요 — 저장 안 한 문서가 사라지는 일은 없습니다.",
+      "프린터 출력: 파일을 기본 프린터로 직접 인쇄 (★폰에서 누르시면 인쇄하지 않고 그 문서를 폰으로 받으십니다 — 인쇄는 사무실에서) / 엑셀 관리대장 · 찬양 가사 PPT",
       "파일 읽기: TXT·DOCX 내용 불러오기"]),
      ("★ 저장 방식 — 어디에 어떻게 저장되나요? (꼭 읽어보세요)",[
       "자동 저장: 무엇을 만들면 곧바로 파일로 저장됩니다. 따로 ‘저장’ 버튼을 누를 필요가 없습니다.",
@@ -4917,13 +5392,18 @@ def manual(a):
       "🔒 자료 영구 보존: 업데이트해도 교인·심방·설교 등 모든 자료는 삭제되지 않습니다.",
       "🔥 피닉스 복구: 실수로 지워져도 지난 시점으로 언제든 되살립니다(자동 스냅샷).",
       "💾 자료 백업: 언제든 전체 백업 / 🔔 업데이트: 새 기능이 오면 표시등이 켜지고 눌러서 업데이트",
-      "💡 기능 요청: 원하는 기능을 적으면 담당자에게 전달되어 다음 업데이트에 반영됩니다."]),
+      "💡 기능 요청: 원하는 기능을 적으면 담당자에게 전달되어 다음 업데이트에 반영됩니다.",
+      "📱 폰 접속 설정: 핸드폰에서도 이 프로그램을 그대로 쓰실 수 있습니다. 「📱 폰 접속 설정」 카드에서 비밀번호를 하나 정하시고 폰 접속을 켜 주세요. 폰에서는 처음 한 번만 비밀번호를 넣으시면 되고, 사무실 컴퓨터에서는 지금까지처럼 아무것도 묻지 않습니다. 폰 로그인 화면의 「이 폰 기억하기」를 켜 두시면 약 30일 동안 다시 묻지 않고, 끄시면 브라우저를 닫을 때까지만 열립니다(빌린 기기로 잠깐 보실 때 꺼 주세요).",
+    "📱 비밀번호를 여러 번 틀렸을 때: 잠기지 않습니다 — 답이 점점 늦어질 뿐이고(최대 1분) 맞는 비밀번호를 넣으시면 그대로 들어가집니다. 기계가 비밀번호를 마구 찍어 보는 것을 늦추기 위한 장치입니다.",
+    "📱 이 비밀번호가 막는 것과 못 막는 것: 같은 와이파이에 있는 다른 사람이 '우연히' 열어 보는 것은 막아 줍니다. 다만 지금 연결은 암호화(https)가 아니라서 같은 와이파이에서 작정하고 엿보면 비밀번호가 보일 수 있습니다 — 카페·공항 같은 공용 와이파이에서는 쓰지 마세요.",
+      "📱 폰을 잃어버리셨다면: 같은 카드의 「폰을 잃어버리셨다면 1」을 실행하시면 폰·바깥 기기가 모두 끊깁니다 — 지금 보고 계신 폰에서 누르셨다면 그 폰에서도 비밀번호를 다시 넣으셔야 합니다. 사무실 컴퓨터는 그대로 쓰실 수 있습니다. (비밀번호만 바꾸셔도 폰 로그인은 전부 끊깁니다)"]),
      ("⚠ 문제가 생겼을 때 — 영어가 아니라 한국어로 알려 드립니다",[
       "무엇이 잘 안 될 때 영문 오류 대신 ①무엇 때문인지 ②무엇을 하시면 되는지 ③자료는 안전하다는 것을 한국어로 알려 드립니다. 화면(카드)과 번호 메뉴 양쪽 모두 같습니다.",
       "자주 있는 경우: ‘만들려는 문서가 한글·워드·엑셀에서 열려 있습니다’(그 문서를 닫고 다시) · ‘인터넷 연결이 잠시 끊겼습니다’(연결 확인 후 다시) · ‘필요한 파일을 찾지 못했습니다’(파일 이름·위치 확인) · ‘저장 공간이 부족합니다’.",
       "★ 어떤 경우에도 입력하신 교인·심방·재정 자료는 그대로 있습니다. 오류는 ‘그 작업을 끝내지 못한 것’이지 자료가 지워지는 일이 아닙니다.",
       "기술적인 내용은 _시스템\\_오류기록 폴더에 ‘오류_날짜_시각.txt’ 파일로 남습니다. 같은 문제가 계속되면 그 파일을 담당자에게 보내 주시면 다음 업데이트에서 고쳐 드립니다. (이 파일에는 교인·재정 자료가 들어있지 않습니다)",
-      "💾 백업 알림: 백업하신 지 오래되었거나 한 번도 안 하셨으면 화면과 번호 메뉴에서 알려 드립니다. 보이시면 「자료 백업」(번호 메뉴 88번)을 한 번만 눌러 주세요 — 1분이면 끝납니다."]),
+      "💾 백업 알림: 백업하신 지 오래되었거나 한 번도 안 하셨으면 화면과 번호 메뉴에서 알려 드립니다. 보이시면 「자료 백업」(번호 메뉴 88번)을 한 번만 눌러 주세요 — 1분이면 끝납니다.",
+      "★ 폴더를 옮기지 말아 주세요: 이 프로그램은 옆에 있는 「교회행정시스템 배포판(나눔용)」 폴더 안의 파이썬으로 실행됩니다. 그 폴더를 다른 곳으로 옮기거나 지우시면 프로그램이 켜지지 않습니다. 그런 경우에도 검은 창에 무엇이 없는지·어디를 확인하면 되는지 한국어로 알려 드리니, 그 안내대로 폴더를 원래 자리에 두시면 바로 다시 켜집니다. (자료는 그대로 있습니다)"]),
      ("🔥 피닉스 복구 — 실수로 지운 자료 되살리기 (꼭 알아두세요)",[
       "이것이 무엇인가: 교인·설교·재정 자료를 저장할 때마다 그 순간의 사진(스냅샷)을 자동으로 찍어 최근 60개까지 보관합니다. 그래서 실수로 지우거나 잘못 고쳐도 지난 시점으로 되살릴 수 있습니다.",
       "언제 쓰나: ①교인을 실수로 삭제했을 때  ②재정·심방 기록을 잘못 지웠거나 엉뚱하게 고쳤을 때  ③자료가 이상해진 것 같을 때 — 언제든.",
@@ -5613,6 +6093,7 @@ def main():
     add("finance-import",finance_import,"file","sheet","year","shape","apply","allowneg")
     add("member-update",member_update,"name","sex","birth","birthtype","tel","addr","role","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","memo","date")
     add("card-vis",card_vis,"name","act")
+    add("phone-setup",phone_setup,"pw","pw2","on","way","logoutall")
     add("office-add",office_add,"name","role","memo","date")
     add("office-list",office_list,"name")
     ml=add("member-list",member_list,"cell")

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """교회 종합행정시스템 — 웹 대시보드(모던 UI). 브라우저에서 카드로 사용.
 실행: python church_web.py  → 자동으로 브라우저 열림(localhost). church.py를 그대로 구동."""
-import os, sys, json, subprocess, threading, webbrowser, re
+import os, sys, json, subprocess, threading, webbrowser, re, time, hashlib, hmac, secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE=os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +21,507 @@ def cfg():
         except Exception: pass
     return {"교회명":"○○교회","담임":"담임목사"}
 C=cfg()
+
+# ── 📱 폰 접속 자물쇠 ──────────────────────────────────────────────────────
+#    ★인증은 ★항상 요구한다. "이 컴퓨터에서 왔으니 통과"라는 예외를 두지 않는다.
+#      접속 주소(client_address)로 통과를 결정하면, 나중에 누가 중계(프록시)를 한 겹만 얹어도
+#      ★모든 접속이 이 컴퓨터에서 온 것처럼 보여 전원이 무인증 통과가 된다.
+#      그 대신 사무실 컴퓨터는 기동할 때 발급한 '로컬 열쇠'로 ★자동 로그인한다 —
+#      목사님은 지금처럼 바탕화면 아이콘만 누르시면 되고, 비밀번호를 치실 일이 없다.
+#    ★세션·비밀번호는 church_config.json 에만 둔다. 새 파일을 만들지 않는다.
+#      새 파일은 빌드·발행·설치본ZIP·업데이트보호 네 곳에 모두 등록해야 하고 하나만 빠져도 샌다.
+#      church_config.json 은 네 곳 모두에서 이미 안전함을 기계로 확인했다(발행 EXCL_NAMES /
+#      빌드 미복사 / 설치본 미포함 / update prot_files 보호).
+COOKIE_NAME="church_phone_sid"
+CSRF_HEADER="X-Church-App"     # 단순 폼(enctype=text/plain)은 이 헤더를 붙일 수 없다 = CSRF 차단
+# ── 무차별 대입 대비 — ★잠금이 아니라 '점증 지연' (오너 티켓 2026-08-20 §1-4) ────────
+#   ★왜 잠그지 않는가: 잠그면 **목사님 본인이 못 들어가는 사고**가 난다(심방 중에 10분 대기).
+#     막으려는 것은 '기계가 초당 수백 번 두드리는 것'이지 '사람이 몇 번 틀리는 것'이 아니다.
+#     지연은 기계에는 치명적이고(수천 번 시도가 수십 시간이 된다) 사람에게는 몇 초다.
+FAIL_MAX=5          # 이 횟수부터 지연을 건다(그 전까지는 즉답)
+FAIL_DELAY=1.5      # 틀릴 때마다의 기본 지연 — 자동 대입의 속도를 떨어뜨린다
+DELAY_MAX=60        # 지연 상한(초). ★여기까지만 늘어난다 — 무한히 늘리면 그것이 곧 잠금이다
+FAIL_KEEP=1800      # 실패 기억 보관 시간(초) — 이만큼 조용하면 잊는다
+_SESS={}                       # {토큰: [만료, 발급, 종류]}  종류 = local | remote
+_SESS_LOCK=threading.Lock()
+FAIL_KEYS_MAX=512   # 실패 기억 항목 상한(무한 증식 방지)
+GLOBAL_MAX=30       # 대역을 바꿔 가며 두드릴 때를 위한 전체 상한
+_FAILS={}                      # {대역키: [연속실패, (미사용·0), 최종시각]}  ★두 번째 칸은 잠금해제시각이었다 — 잠금을 없애며 0 으로 둔다
+_GLOBAL=[0,0,0]                # [전체실패, (미사용·0), 최종시각]
+# ★프록시가 붙인 머리글들. 신뢰하려고 보는 게 아니라 ★거절하려고 본다 —
+#   이 머리글이 있다는 것은 중계를 거쳤다는 뜻이고, 그러면 접속 주소가 이 컴퓨터로 보인다.
+PROXY_HEADERS=("X-Forwarded-For","X-Forwarded-Host","X-Forwarded-Proto","X-Real-IP",
+               "Forwarded","Via","Tailscale-User-Login","Tailscale-User-Name")
+_SAVED_EXP={}                  # 디스크에 적어 둔 만료 — 이만큼 밀렸을 때만 다시 적는다
+_LOCAL_KEY=""                  # 기동할 때마다 새로 만드는 사무실 컴퓨터용 열쇠(메모리)
+_BOUND=[]                      # 실제로 바인딩한 주소들 — Host 화이트리스트의 근거
+
+CFG_PATH=os.path.join(BASE,"church_config.json")
+_CFG_CACHE={"mtime":None,"data":{}}
+_CFG_LOCK=threading.Lock()
+_CFG_BROKEN=[""]        # 설정 파일이 깨졌을 때의 사유(한국어). 비어 있으면 정상.
+
+def _cfg_live():
+    """설정을 그때그때 반영하되, 바뀌지 않았으면 파일을 다시 읽지 않는다.
+       (방금 정하신 비밀번호·방금 켠 스위치가 바로 먹히면서도 요청마다 파일을 여는 낭비는 없게)
+       ★파일이 깨져 있으면 ★기본값을 지어내지 않는다 — 지어내면 '비밀번호가 없는 상태'로 보여
+         원인 모를 폰접속 사망이 되거나, 더 나쁘게는 보호가 조용히 사라진다. 사유를 남기고 멈춘다."""
+    try: mt=os.path.getmtime(CFG_PATH)
+    except Exception:
+        _CFG_BROKEN[0]=""                 # 아직 설정 파일이 없는 것은 정상(첫 실행)
+        return _CFG_CACHE["data"] or {}
+    if _CFG_CACHE["mtime"]!=mt:
+        try:
+            d=json.load(open(CFG_PATH,encoding='utf-8'))
+            if not isinstance(d,dict): raise ValueError("설정 형식이 아닙니다")
+            _CFG_CACHE["data"]=d; _CFG_CACHE["mtime"]=mt; _CFG_BROKEN[0]=""
+        except Exception as e:
+            _CFG_BROKEN[0]=("설정 파일(church_config.json)을 읽지 못했습니다 — "+type(e).__name__+
+                            ". 폰 접속을 잠급니다. 사무실 컴퓨터에서 확인해 주세요"
+                            " (바로 옆의 church_config.json.bak 이 직전 정상본입니다).")
+    return _CFG_CACHE["data"]
+
+def _cfg_write(patch):
+    """설정 파일에 몇 항목만 얹어 저장한다.
+       ★다시 읽고 → 직전 정상본 백업 → 임시파일 → fsync → 바꿔치기(os.replace).
+         메모리에 들고 있던 옛 설정으로 통째로 쓰면 방금 다른 기능이 저장한 값(교회 이름 등)을 지운다.
+         중간에 전원이 나가도 반쪽짜리 설정 파일이 남지 않는다.
+       ★깨진 설정 위에는 쓰지 않는다 — 덮어쓰면 교회명·아카이브루트·숨긴카드까지 함께 잃는다."""
+    with _CFG_LOCK:
+        try:
+            c={}
+            if os.path.exists(CFG_PATH):
+                try:
+                    c=json.load(open(CFG_PATH,encoding='utf-8'))
+                    if not isinstance(c,dict): raise ValueError("설정 형식이 아닙니다")
+                except Exception:
+                    return False          # 깨진 설정을 덮어써 교회 이름까지 날리지 않는다
+                try: __import__("shutil").copy2(CFG_PATH, CFG_PATH+".bak")   # 직전 정상본 보관
+                except Exception: pass
+            c.update(patch)
+            tmp=CFG_PATH+".tmp"
+            with open(tmp,'w',encoding='utf-8') as f:
+                json.dump(c,f,ensure_ascii=False,indent=2)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(tmp,CFG_PATH)
+            _CFG_CACHE["mtime"]=None      # 다음 읽기 때 새로 읽게
+            return True
+        except Exception:
+            return False
+
+def _sess_days():
+    try: return max(1, int(_cfg_live().get("폰세션유효일",30) or 30))
+    except Exception: return 30
+
+def _sess_cut():
+    """이 시각 이전에 로그인한 ★폰(remote) 기기를 끊는다('모든 기기 로그아웃'을 누르셨을 때).
+       ★사무실(local) 로그인에는 걸지 않는다 — 대조하는 곳은 _sess_get 이고, 거기서 remote 로 한정한다.
+       (여기 설명과 그쪽 코드가 어긋나면 안 된다. 한쪽만 고치지 마라.)"""
+    try: return float(_cfg_live().get("폰세션무효화") or 0)
+    except Exception: return 0.0
+
+def _sess_load():
+    """서버가 다시 떠도(업데이트 자동 재시작 포함) 폰이 다시 로그인하지 않게 — 심방 중에 로그인 화면을 만나면 안 된다."""
+    try:
+        now=time.time()
+        with _SESS_LOCK:
+            for t,v in (_cfg_live().get("폰세션") or {}).items():
+                if not isinstance(v,(list,tuple)) or len(v)<4: continue
+                if float(v[0])>now:
+                    # 5번째 칸 = 그 세션의 길이(초). 옛 기록에는 없으므로 그때는 설정값을 쓴다.
+                    _ttl=float(v[4]) if len(v)>=5 and v[4] else _sess_days()*86400
+                    _SESS[t]=[float(v[0]),float(v[1]),str(v[2]),float(v[3]),_ttl]; _SAVED_EXP[t]=float(v[0])
+    except Exception: pass
+
+def _tok_key(t):
+    """토큰을 저장할 때 쓰는 값. ★파일에는 토큰 원문을 적지 않는다 — 원문을 적으면
+       그 파일을 보는 사람이 그대로 로그인할 수 있다. 원문은 폰의 쿠키에만 있고,
+       여기에는 되돌릴 수 없는 형태만 남는다(새어도 그 값으로는 위조가 안 된다)."""
+    return hashlib.sha256(("church-sess:"+(t or "")).encode('utf-8')).hexdigest()
+
+def _pw_gen():
+    """지금 비밀번호의 '세대'. 비밀번호를 바꾸면 이 값이 바뀐다.
+       ★화면 프로그램과 설정 프로그램은 별개 프로세스라 서로의 기억을 지울 수 없다.
+         그래서 '지운다' 대신 '세대가 다르면 무효'로 취소 경로를 만든다."""
+    r=_cfg_live().get("폰비밀번호")
+    try: return float(r.get("세대") or 0) if isinstance(r,dict) else 0.0
+    except Exception: return 0.0
+
+def _sess_save():
+    """세션을 설정 파일에 적는다. ★요청마다 적지 않는다 — 만들거나 지울 때, 그리고
+       접속 갱신이 하루 넘게 밀렸을 때만 부른다(디스크 혹사 방지)."""
+    try:
+        now=time.time()
+        with _SESS_LOCK:
+            snap={t:v for t,v in _SESS.items() if v[0]>now}   # 지난 것은 적지 않는다(설정 파일 비대화 방지)
+            _SESS.clear(); _SESS.update(snap)
+            _SAVED_EXP.clear(); _SAVED_EXP.update({t:v[0] for t,v in snap.items()})
+        _cfg_write({"폰세션":snap})
+    except Exception: pass
+
+NOREMEMBER_SEC=12*3600   # '이 폰 기억하기'를 끄셨을 때의 서버측 유효시간(12시간)
+
+def _sess_new(kind, ttl=None):
+    """kind: local = 이 컴퓨터(열쇠로 자동 로그인) / remote = 폰(비밀번호로 로그인)
+       ttl: 이 세션의 유효시간(초). 안 주면 설정값(기본 30일).
+       ★유효시간을 세션마다 들고 다니는 이유: '기억하기'를 끄신 로그인은 짧게 끝나야 하는데,
+         아래 _sess_get 이 접속할 때마다 만료를 다시 미는(슬라이딩) 구조라
+         길이를 세션에 안 적어 두면 짧은 세션도 30일로 밀려 버린다."""
+    now=time.time(); t=secrets.token_urlsafe(32)
+    _ttl=float(ttl if ttl else _sess_days()*86400)
+    with _SESS_LOCK: _SESS[_tok_key(t)]=[now+_ttl, now, kind, _pw_gen(), _ttl]
+    _sess_save(); return t          # 원문은 쿠키로만 나간다
+
+def _sess_get(t):
+    """살아 있으면 [만료, 발급, 종류, 세대], 아니면 None. ★접속할 때마다 만료를 다시 30일로 민다
+       (슬라이딩) — 심방지에서 갑자기 로그아웃되어 비밀번호가 기억 안 나는 상황을 막는다.
+       계속 쓰시는 한 안 끊기고, 폰을 잃어 안 쓰면 30일 뒤 저절로 막힌다."""
+    if not t: return None
+    if _CFG_BROKEN[0]: return None      # 설정을 못 읽는 동안에는 아무도 통과시키지 않는다(fail-closed)
+    now=time.time(); k=_tok_key(t)
+    with _SESS_LOCK: v=_SESS.get(k)
+    if not v: return None
+    # ★비밀번호를 바꾸면 폰 로그인은 전부 끊는다 — 폰을 잃어버리셨을 때의 유일한 조치가 이것이다.
+    #   사무실 로그인(local)은 이 컴퓨터에서만 얻는 열쇠로 만들어진 것이라 여기서 끊지 않는다
+    #   (비밀번호를 정하신 그 화면이 그 순간 로그아웃되면 안 되기 때문이다).
+    if v[2]=="remote" and v[3]!=_pw_gen():
+        with _SESS_LOCK: _SESS.pop(k,None)
+        _sess_save(); return None
+    # ★'모든 기기에서 로그아웃'도 폰(remote)에만 걸린다 — 폰을 잃어버려 그 버튼을 누르신 목사님이
+    #   보고 계신 사무실 화면까지 함께 잃으면 안 된다. 사무실 로그인은 이 컴퓨터에서만 얻는
+    #   열쇠로 만들어진 것이라 잃어버린 폰과 함께 끊을 이유가 없다(위 세대 대조와 같은 형태다).
+    if v[0]<=now or (v[2]=="remote" and v[1]<_sess_cut()):
+        with _SESS_LOCK: _SESS.pop(k,None)
+        _sess_save(); return None
+    # ★슬라이딩은 ★그 세션의 길이만큼만 민다 — '기억하기'를 끄신 로그인(12시간)이
+    #   접속할 때마다 30일로 밀려나면 그 선택이 무의미해진다. 옛 세션(길이 칸 없음)은 종전대로.
+    _ttl=float(v[4]) if len(v)>=5 and v[4] else _sess_days()*86400
+    new_exp=now+_ttl
+    with _SESS_LOCK: v[0]=new_exp
+    if new_exp-_SAVED_EXP.get(k,0)>86400: _sess_save()   # 하루 넘게 밀렸을 때만 디스크에
+    return list(v)
+
+def _sess_ok(t): return _sess_get(t) is not None
+
+def _sess_drop(t):
+    if not t: return
+    with _SESS_LOCK: _SESS.pop(_tok_key(t),None)
+    _sess_save()
+
+def _pw_rec():
+    r=_cfg_live().get("폰비밀번호")   # 설정은 그때그때 다시 읽는다 — 방금 정하신 비밀번호가 바로 먹혀야 한다
+    return r if isinstance(r,dict) else None
+
+def _pw_verify(pw):
+    rec=_pw_rec()
+    if not rec: return False
+    try:
+        s=rec.get("솔트") or ""; want=rec.get("해시") or ""
+        if not s or not want: return False
+        it=int(rec.get("반복") or 240000)
+        got=hashlib.pbkdf2_hmac('sha256',(pw or "").encode('utf-8'),bytes.fromhex(s),it).hex()
+        return hmac.compare_digest(got,want)
+    except Exception:
+        return False
+
+def _fail_key(ip):
+    """잠금을 셀 단위. ★IPv6 는 주소 하나가 아니라 대역(/64)으로 센다 —
+       주소를 하나씩 바꿔 가며 시도하면 주소별 잠금은 그냥 무력화되기 때문이다."""
+    s=(ip or "").strip()
+    if ":" in s:
+        p=s.split("%")[0].split(":")
+        return "v6:"+":".join(p[:4])          # 앞 64비트만
+    return s
+
+def _fail_sweep():
+    """지난 항목 청소 + 상한. ★안 하면 주소를 바꿔 가며 두드리는 것만으로 기억이 무한히 불어난다."""
+    now=time.time()
+    for k in [k for k,v in _FAILS.items() if v[2]<now-FAIL_KEEP]: _FAILS.pop(k,None)
+    if len(_FAILS)>FAIL_KEYS_MAX:
+        for k,_ in sorted(_FAILS.items(), key=lambda kv: kv[1][2])[:len(_FAILS)-FAIL_KEYS_MAX]:
+            _FAILS.pop(k,None)
+
+def _delay_for(ip):
+    """이번 시도에 걸 ★지연 시간(초). 0 이면 즉답.
+       ★잠금이 아니다 — 언제든 맞는 비밀번호를 넣으면 들어가진다. 늦게 답할 뿐이다.
+       계단: 5회째부터 1s → 2s → 4s → 8s … ★최대 60s(그 이상 늘리면 사실상 잠금이 된다).
+       ★어느 주소도 예외로 두지 않는다. 예외를 두면 중계가 한 겹 얹혔을 때 그 예외가
+         전원에게 적용되어 비밀번호를 무제한으로 시도할 수 있게 된다.
+       사무실 컴퓨터는 열쇠로 자동 로그인해 비밀번호를 칠 일이 없으므로, 지연을 만날 일이 없다."""
+    now=time.time()
+    f=_FAILS.get(_fail_key(ip))
+    n=f[0] if (f and f[2]>now-FAIL_KEEP) else 0
+    # 대역을 바꿔 가며 두드리는 경우 — 주소별 계단을 다 피해 가므로 전체 카운터도 함께 본다.
+    g=_GLOBAL[0] if _GLOBAL[2]>now-FAIL_KEEP else 0
+    n=max(n, g-(GLOBAL_MAX-FAIL_MAX) if g>=GLOBAL_MAX else 0)
+    if n<FAIL_MAX: return 0
+    return min(DELAY_MAX, 2**(n-FAIL_MAX))
+
+def _fail_mark(ip):
+    now=time.time(); k=_fail_key(ip)
+    f=_FAILS.get(k) or [0,0,now]
+    if f[2]<now-FAIL_KEEP: f[0]=0                     # 오래 조용했으면 계단을 처음부터
+    f[0]+=1; f[2]=now; f[1]=0                         # ★잠금해제시각 칸은 이제 쓰지 않는다
+    _FAILS[k]=f
+    if _GLOBAL[2]<now-FAIL_KEEP: _GLOBAL[0]=0         # 조용한 시간이 지나면 초기화
+    _GLOBAL[0]+=1; _GLOBAL[2]=now
+    _fail_sweep()
+
+def _fail_clear(ip):
+    _FAILS.pop(_fail_key(ip),None); _GLOBAL[0]=0
+
+VPN_EXE_NAME="tailscale.exe"    # 사설망 프로그램 — 주소를 이 프로그램에 직접 물어본다
+VPN_ADAPTER_HINT="tailscale"    # 랜 카드 이름에 이 낱말이 들어 있으면 사설망 카드다
+
+def _vpn_exe():
+    """사설망(VPN) 프로그램의 위치. 없으면 빈 문자열(= 아직 안 깔려 있다)."""
+    for d in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+              os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"):
+        try:
+            p=os.path.join(d,"Tailscale",VPN_EXE_NAME)
+            if os.path.exists(p): return p
+        except Exception: pass
+    return ""
+
+def _vpn_ip():
+    """폰이 들어올 ★사설망(VPN) 주소. 돌려주는 값 = (주소, 못 연 사유).
+       ★2026-08-27: 이름만 `_phone_ip` → `_vpn_ip` 로 바꿨다(본문 무수정).
+         길이 둘(사설망·같은 와이파이)이 되었으므로, «폰 주소»라는 이름은 이제
+         ★어느 길인지 고르는 함수(아래 `_phone_ip`)가 가져간다. 이 함수는 그중 «사설망 길» 담당이다.
+       ① ★사설망 프로그램에 직접 물어본다 — 가장 정확하다(이름이 달라도, 카드가 여러 개여도 맞다).
+       ② 안 되면 ★랜 카드 '이름'으로 지목한다.
+       ③ 둘 다 안 되면 ★빈 문자열 — 그리고 ★사유를 두 가지로 갈라 알려 드린다
+          (안 깔려 있다 / 깔려 있는데 아직 연결이 안 됐다). 목사님이 하실 일이 서로 다르기 때문이다.
+       ★랜(공유기) 주소에는 절대 붙이지 않는다 — 같은 와이파이의 다른 기기에 보이면 안 된다.
+       ★주소 숫자(100.으로 시작)로 고르지 않는다 — 그 대역은 ★통신사가 쓰는 대역과 같아서,
+         인터넷 회선이 그 대역을 쓰는 집·교회에서는 ★엉뚱한 랜 카드를 사설망으로 착각한다.
+       ★IPv4 만 쓴다. 사설망은 IPv6 주소도 주지만 여기서는 열지 않으므로, 안내에도 IPv4 만 적는다.
+       ★church.py 의 _phone_addr() 와 ★같은 규칙이어야 한다 — 한쪽만 고치지 마라.
+         카드에 적힌 주소와 실제로 열린 주소가 어긋나면 목사님이 헛걸음하신다."""
+    exe=_vpn_exe(); installed=bool(exe)
+    # ① 사설망 프로그램에 직접 물어본다
+    try:
+        out=subprocess.run([exe or "tailscale","ip","-4"],capture_output=True,text=True,
+                           encoding='utf-8',errors='replace',timeout=10).stdout or ""
+        installed=True                                      # 실행이 됐다 = 깔려 있다
+        m=re.search(r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s*$", out, re.M)
+        if m: return m.group(1), ""
+    except FileNotFoundError: pass                          # 그 이름의 프로그램이 없다 = 안 깔려 있다
+    except Exception: pass
+    # ② 랜 카드 이름으로 지목 — 이름 안에 사설망 프로그램 이름이 있는 칸의 IPv4 를 쓴다
+    try:
+        out=subprocess.run(["ipconfig"],capture_output=True,text=True,
+                           encoding='cp949',errors='replace',timeout=10).stdout or ""
+        cur=""
+        for ln in out.splitlines():
+            if ln.strip() and not ln.startswith(" "): cur=ln          # 어댑터 제목 줄
+            elif VPN_ADAPTER_HINT in cur.lower():
+                m=re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", ln)
+                if m and ("IPv4" in ln or "IP Address" in ln or "주소" in ln):
+                    return m.group(1), ""
+    except Exception: pass
+    # ③ 못 찾았으면 열지 않는다 — 숫자만 보고 아무 카드에나 붙이지 않는다.
+    #    (폰 접속을 못 여는 것이 ★잘못 여는 것보다 낫다.)
+    # ★가리키는 곳은 ★화면의 카드다. 바깥 문서를 가리키면 목사님이 그 파일을 찾아 헤매신다.
+    #   ★church.py 의 _phone_addr() 에 ★같은 문장이 있다(이중 상수) — 한쪽만 고치지 마라.
+    #     들어온 길에 따라 다른 말이 나오면 그것만으로 목사님은 헷갈리신다.
+    if installed:
+        return "", "사설망(VPN)은 깔려 있지만 아직 연결되지 않았습니다 — 사설망 프로그램에서 로그인·연결을 마쳐 주세요."
+    return "", "사설망(VPN)이 아직 깔려 있지 않습니다 — 「📱 폰 접속 설정」 카드에 설치 순서가 적혀 있습니다."
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ★폰 접속 «길» 2가지 — 부채 4-2 이식분 (2026-08-27 · 오너 결정: 와이파이 먼저, 밖은 사설망)
+#   "사설망"   = 사설망(VPN) 주소에만 연다. ★밖에서도 된다. 설치·로그인이 필요하다.
+#   "와이파이" = 같은 공유기 안의 랜 주소에만 연다. ★설치 0회. 밖에서는 안 된다.
+#   "자동"     = 사설망을 먼저 찾고, 없으면 와이파이로 연다.
+#   ★기본값을 "사설망"으로 둔다 — 이미 폰 접속을 켜 두신 분이 업데이트만 했는데
+#     어느 날 갑자기 교회 와이파이에 로그인 화면이 열려서는 안 된다. 와이파이는 ★직접 고르셔야 열린다.
+PHONE_WAY_DEFAULT="사설망"
+PHONE_WAYS=("사설망","와이파이","자동")
+
+def _phone_way():
+    """지금 고르신 폰 접속 방식. 설정에 없거나 모르는 값이면 ★기본값(사설망)으로 본다 —
+       설정 파일의 오타 하나로 와이파이가 조용히 열리는 일은 없어야 한다.
+       ★church.py 의 `_phone_way()` 와 ★같은 규칙이어야 한다 — 한쪽만 고치지 마라.
+         (두 파일은 서로 import 하지 않는다. 그래서 ★기계 대조 시험으로 지킨다:
+          시험대 `_실험/lane4_rule_parity.py` — 한쪽만 고치면 그 시험이 빨간불을 낸다.)"""
+    w=(_cfg_live().get("폰접속방식") or "").strip()
+    return w if w in PHONE_WAYS else PHONE_WAY_DEFAULT
+
+def _is_lan_v4(ip):
+    """이 주소가 ★사설 대역(RFC1918)인가 — 10. / 172.16~31. / 192.168. 만 참이다.
+       ★공인(인터넷) 주소에는 어떤 경우에도 붙지 않는다 — 붙으면 세상 전체에 열린다.
+       ★100.64~100.127 은 여기서 ★거짓이다. 그 대역은 통신사가 쓰는 대역과 같아서
+         숫자만 보고 '내 랜'이라 부를 수 없다(사설망 주소는 숫자가 아니라 프로그램에 물어 고른다).
+       ★169.254(주소를 못 받았을 때 스스로 붙이는 임시 주소)도 거짓 — 폰이 그리로는 못 온다.
+       ★church.py 의 `_is_lan_v4()` 와 ★같은 규칙이어야 한다 — 한쪽만 고치지 마라."""
+    try:
+        p=[int(x) for x in (ip or "").split(".")]
+    except Exception: return False
+    if len(p)!=4 or any(x<0 or x>255 for x in p): return False
+    if p[0]==10: return True
+    if p[0]==172 and 16<=p[1]<=31: return True
+    if p[0]==192 and p[1]==168: return True
+    return False
+
+def _is_cgnat_v4(ip):
+    """100.64.0.0/10 — 사설망(Tailscale)이 나눠 주는 대역. ★사설망으로 찾았을 때만 인정한다.
+       숫자만 보고 이 대역을 '내 랜'으로 삼으면, 이 대역을 쓰는 인터넷 회선에서 엉뚱한 카드를 연다."""
+    try:
+        p=[int(x) for x in (ip or "").split(".")]
+    except Exception: return False
+    return len(p)==4 and p[0]==100 and 64<=p[1]<=127
+
+# 랜 주소를 찾을 때 ★건너뛰는 카드 이름. 가상 카드에 붙으면 주소는 사설 대역이지만
+#   폰은 그 주소에 절대 닿지 못한다 — 있으나 마나 한 주소를 카드에 적어 드리게 된다.
+LAN_SKIP_HINTS=("tailscale","vethernet","wsl","hyper-v","hyperv","virtualbox","vmware",
+                "loopback","bluetooth","docker","가상","tap-","openvpn","zerotier","teredo")
+
+def _lan_ip():
+    """폰이 들어올 ★같은 와이파이(사설 랜) 주소. 돌려주는 값 = (주소, 못 연 사유).
+       ① ★바깥으로 나갈 때 쓰이는 내 주소를 운영체제에 물어본다.
+          (UDP 라서 ★실제로 나가는 것은 없다 — 어느 랜 카드로 나가는지만 물어보는 것이다.)
+       ② 그게 안 되면 ipconfig 를 읽어 가상 카드를 걸러내고 사설 대역 하나를 고른다.
+       ★어느 길로 찾았든 ★사설 대역이 아니면 버린다. 공유기 없이 인터넷에 바로 붙은
+         컴퓨터라면 그 주소는 공인 주소이고, 거기에 열면 세상 전체에 로그인 화면이 열린다.
+       ★church.py 의 `_lan_addr()` 와 ★같은 규칙이어야 한다 — 한쪽만 고치지 마라."""
+    pub=""
+    try:
+        import socket as _sk          # ★이 파일 머리에는 socket 이 없다 — 여기서만 부른다(lane4 와 같은 방식)
+        s=_sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80)); ip=s.getsockname()[0]
+        finally:
+            s.close()
+        if _is_lan_v4(ip): return ip,""
+        if ip and ip!="0.0.0.0" and not ip.startswith("127."): pub=ip
+    except Exception: pass
+    try:
+        out=subprocess.run(["ipconfig"],capture_output=True,text=True,
+                           encoding='cp949',errors='replace',timeout=10).stdout or ""
+        cur=""
+        for ln in out.splitlines():
+            if ln.strip() and not ln.startswith(" "): cur=ln.lower()       # 어댑터 제목 줄
+            elif any(h in cur for h in LAN_SKIP_HINTS):                    # 가상·사설망 카드는 건너뛴다
+                continue
+            else:
+                m=re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", ln)
+                if m and ("IPv4" in ln or "IP Address" in ln or "주소" in ln):
+                    if _is_lan_v4(m.group(1)): return m.group(1),""
+    except Exception: pass
+    if pub:
+        return "", ("이 컴퓨터가 공유기 없이 인터넷에 바로 붙어 있는 것 같습니다 — "
+                    "안전을 위해 같은 와이파이 방식으로는 열지 않았습니다(사설망 방식을 써 주세요).")
+    return "", "같은 와이파이 주소를 찾지 못했습니다 — 컴퓨터가 공유기(와이파이·랜)에 연결돼 있는지 확인해 주세요."
+
+def _phone_way_label(mode):
+    """열린 길을 목사님 말로. 화면 어디에서나 ★같은 낱말을 쓰기 위한 한 곳이다."""
+    return {"vpn":"사설망","wifi":"같은 와이파이"}.get(mode,"")
+
+def _phone_ip():
+    """폰이 들어올 주소. 돌려주는 값 = (주소, 못 연 사유, ★어느 길로 열렸는지).
+       길 = "vpn"(사설망) · "wifi"(같은 와이파이) · ""(못 찾음).
+       ★어느 길인지를 함께 돌려주는 이유 — 화면에 적어 드릴 안내문이 서로 정반대다.
+         사설망은 "밖에서도 됩니다", 와이파이는 "교회 와이파이 안에서만 됩니다".
+         이걸 안 돌려주면 안내문이 둘 중 하나는 반드시 거짓말이 된다.
+       ★church.py 의 `_phone_addr()` 와 ★같은 규칙이어야 한다 — 한쪽만 고치지 마라."""
+    way=_phone_way()
+    if way=="와이파이":
+        ip,why=_lan_ip()
+        return (ip,"","wifi") if ip else ("",why,"")
+    ip,vwhy=_vpn_ip()
+    if ip: return ip,"","vpn"
+    if way=="자동":
+        lip,lwhy=_lan_ip()
+        if lip: return lip,"","wifi"
+        return "", f"{vwhy} 그리고 {lwhy}", ""
+    return "",vwhy,""
+
+FORBIDDEN_BIND=("0.0.0.0","::","")   # ★공용 바인딩 금지 — 이 한 줄이 미래에 조용히 되돌아오는 자리다
+
+def _bind_plan():
+    """어느 주소에 열지 결정한다. 돌려주는 값 = (주소목록, 폰포트를 못 연 사유, ★열린 길).
+       ① 127.0.0.1 은 ★항상 연다 — 사무실 컴퓨터의 일상 동선이 이 주소다.
+       ② 폰 주소는 ★세 가지가 모두 참일 때만 연다 — 자물쇠 3중 조건이다.
+            ㉮ 폰 접속을 켜셨고 · ㉯ 비밀번호가 있고 · ㉰ 주소를 실제로 찾았다.
+          ★셋 중 하나라도 없으면 폰 포트는 열지 않는다. 특히 ㉯가 없으면 절대 안 연다 —
+            비밀번호 없이 열리면 그 순간 명부가 그냥 공개된다.
+       ★공용 바인딩(0.0.0.0 · ::)은 어떤 방식에서도 쓰지 않는다. 와이파이 방식이라 해도
+         ★랜 카드의 구체적 주소 하나(예 192.168.0.7)에만 붙인다 — 그래야 그 카드 말고는
+         어디에도 나타나지 않고, 나중에 카드가 하나 더 생겨도 조용히 번지지 않는다.
+       ★마지막 자물쇠(2026-08-27 이식분) — 찾은 주소가 사설 대역이 아니면 ★버린다.
+         위쪽에서 아무리 잘못 찾아 와도 여기서 걸린다(공인 주소에 붙는 사고는 되돌릴 수 없다)."""
+    hosts=["127.0.0.1"]; why=""; mode=""
+    cf=_cfg_live()
+    if cf.get("폰접속허용"):
+        if not isinstance(cf.get("폰비밀번호"),dict):
+            why="비밀번호가 아직 없습니다 — 「폰 접속 설정」 카드에서 먼저 정해 주세요."
+        else:
+            ip,vwhy,m=_phone_ip()
+            if ip and (_is_lan_v4(ip) or (m=="vpn" and _is_cgnat_v4(ip))):
+                hosts.append(ip); mode=m
+            elif ip:
+                why=(f"찾은 주소({ip})가 사설 대역이 아니라 열지 않았습니다 — "
+                     "공인 주소에는 붙지 않습니다(그 주소는 인터넷 전체에 열립니다).")
+            else:
+                why=vwhy or "폰에서 들어오실 주소를 찾지 못했습니다 — 「📱 폰 접속 설정」 카드에서 상태를 확인해 주세요."
+    return hosts, why, mode
+
+def _cookie_token(header):
+    for part in (header or "").split(";"):
+        k,_,v=part.strip().partition("=")
+        if k==COOKIE_NAME: return v.strip()
+    return ""
+
+def _allowed_hosts():
+    """Host 머리글 화이트리스트 — 우리가 실제로 바인딩한 주소만.
+       ★이걸 검사하지 않으면 DNS 재바인딩으로 남의 웹사이트가 우리 주소인 척할 수 있다."""
+    out=set()
+    for h in (_BOUND or ["127.0.0.1"]):
+        out.add(f"{h}:{PORT}"); out.add(h)
+    out.add(f"localhost:{PORT}"); out.add("localhost")
+    return out
+
+def _via_proxy(handler):
+    """중계(프록시)를 거쳐 들어온 요청인가.
+       ★머리글은 '이 사람이 누구다'의 근거로는 못 쓰지만 '이 요청은 거절한다'의 근거로는 쓸 수 있다."""
+    return any(handler.headers.get(h) for h in PROXY_HEADERS)
+
+def _is_https(handler):
+    """이 요청이 https 로 들어왔는가. 우리 서버는 http 로만 듣지만, 앞에 https 중계가 붙으면
+       그 사실이 머리글에 남는다. ★이 머리글을 믿어서 문을 여는 게 아니라 ★쿠키를 더 조이는 데만 쓴다 —
+       속아 봐야 쿠키가 더 엄격해질 뿐이라 안전한 방향의 신뢰다."""
+    if (handler.headers.get("X-Forwarded-Proto") or "").strip().lower()=="https": return True
+    for k in ("Origin","Referer"):
+        if (handler.headers.get(k) or "").strip().lower().startswith("https://"): return True
+    return False
+
+def _cookie_attrs(handler):
+    # ★Secure 를 언제 붙이고 언제 빼는지: 사설망 주소에 직접 붙는 기본 경로는 http 라서 붙이면
+    #   쿠키가 저장되지 않아 로그인 자체가 막힌다. 그러나 https 로 들어온 요청이라면 반드시 붙인다
+    #   (붙이지 않으면 그 쿠키가 http 로도 나가 남의 손에 들어갈 수 있다).
+    return "; Secure" if _is_https(handler) else ""
+
+def _csrf_ok(handler):
+    """이 POST 가 우리 화면에서 온 것인가. 넷 중 하나라도 어긋나면 거부한다.
+       (목사님이 아무 웹사이트나 방문했을 때 그 사이트가 몰래 명령을 실행시키는 것을 막는다)
+       ★주의 — "머리글은 위조될 수 있으니 안 본다"는 ★신뢰용엔 맞고 거절용엔 거꾸로다.
+         브라우저는 Origin 을 위조하지 못한다. 머리글은 "이 사람이 누구다"의 근거로는 못 쓰지만
+         "이 요청은 거절한다"의 근거로는 쓸 수 있다. 그래서 여기서는 ★거절에만 쓴다."""
+    h=handler.headers
+    if (h.get(CSRF_HEADER) or "")!="1": return False          # 단순 폼은 이 머리글을 못 붙인다
+    ct=(h.get("Content-Type") or "").split(";")[0].strip().lower()
+    if ct!="application/json": return False                    # text/plain 폼 공격 차단
+    ok=_allowed_hosts()
+    if (h.get("Host") or "").strip().lower() not in ok: return False
+    for k in ("Origin","Referer"):
+        v=(h.get(k) or "").strip()
+        if not v: continue
+        try:
+            from urllib.parse import urlparse
+            if (urlparse(v).netloc or "").lower() not in ok: return False
+        except Exception: return False
+    return True
 
 ACTIONS=[
  # group, cmd, title, icon, fields[(name,label,placeholder,required)]
@@ -124,13 +625,21 @@ ACTIONS=[
  ("재정","budget-set","예산 편성 & 집행현황","🧮",[("year","연도(YYYY·비우면 올해)","",0),("kind","구분(수입/지출)","수입",0),("item","항목(비우면 집행현황 보기 · 예: 십일조/인건비)","",0),("amount","예산액(숫자만·0 삭제)","",0)],"항목을 넣으면 연간 예산을 항목별로 편성하고, 항목을 비우면 예산 대비 집행현황(항목별 집행률·잔액·초과)을 봅니다. 전문가급 예산 관리."),
  ("출력·파일","ppt","찬양 가사 PPT","📽️",[("songs","곡목(;로 구분)","",1),("title","제목","",0)]),
  ("출력·파일","lyrics-screen","가사 스크린(문서)","🖥️",[("songs","곡목(;로 구분)","",1),("title","제목","",0)]),
- ("출력·파일","hwp","한글(.hwp) 변환","📄",[("recent","최근 몇 개(기본10)","10",0)]),
- ("출력·파일","print-file","프린터 출력","🖨️",[("file","파일 경로","",1)]),
- ("출력·파일","open-file","내 파일·작업물 찾아 열기","📁",[("name","파일 이름 검색 (비우면 종류별 목록)","",0),("kind","종류(설교/심방/주보/묵상/찬양/악보/증명서/재정/교안·비우면 전체)","",0)],"파일 이름을 넣으면 프로그램·D폴더·USB에서 찾아 열고, 비우면 종류별 내 작업물을 최근순 목록(눌러 열기)으로 보여줍니다."),
+ # ★A23 2단계 — 카드 자리에 ★경고를 단다(기억 `church-code-text-sync`: 코드를 고치면 문장도 고친다).
+ #   ★왜 필요했나: `hwp_convert` 는 실행 즉시 `taskkill /F /IM Hwp.exe` 를 했다.
+ #     종전 배포판은 pywin32 가 없어 ★그 줄에 닿기 전에 멈췄다 — 없는 의존성이 ★우연히 안전장치였다.
+ #     A23 2단계로 pywin32 를 넣으면서 ★그 줄에 닿게 됐다.
+ #   ★2026-08-27 수리(master 판정 ⑦ 1번안): 이제 `hwp_convert` 가 ★먼저 여쭙는다 —
+ #     한글이 열려 있으면 ★시작하지 않고 몇 개 열려 있는지 알려 드린 뒤 멈춘다(`_hwp_running()`).
+ #     ⇒ 카드 문구도 «닫힙니다»에서 «열려 있으면 시작하지 않습니다»로 함께 고친다.
+ ("출력·파일","hwp","한글(.hwp) 변환","📄",[("recent","최근 몇 개(기본10) ⚠ 한글(HWP)이 열려 있으면 변환을 시작하지 않습니다 — 저장하고 닫으신 뒤 눌러 주세요","10",0)]),
+ ("출력·파일","print-file","프린터 출력","🖨️",[("file","파일 경로","",1)],"파일을 사무실 컴퓨터의 기본 프린터로 바로 보냅니다. ▸★폰에서 누르시면 인쇄하지 않고 ★그 문서를 폰으로 받으십니다 — 폰 옆에는 프린터가 없고, 여기서 인쇄를 걸면 아무도 없는 사무실에서 종이만 나오기 때문입니다. 받으신 문서는 사무실에 오셔서 인쇄하시면 됩니다."),
+ ("출력·파일","open-file","내 파일·작업물 찾아 열기","📁",[("name","파일 이름 검색 (비우면 종류별 목록)","",0),("kind","종류(설교/심방/주보/묵상/찬양/악보/증명서/재정/교안·비우면 전체)","",0)],"파일 이름을 넣으면 프로그램·D폴더·USB에서 찾아 열고, 비우면 종류별 내 작업물을 최근순 목록(눌러 열기)으로 보여줍니다. ▸★폰에서는 파일이 사무실 화면에서 열리는 대신 ★폰으로 바로 받아집니다(받기 단추가 뜹니다). ▸폴더나 인터넷 주소는 폰으로 받을 수 없어 위치만 알려 드립니다."),
  ("출력·파일","nlm-add","NotebookLM에 자료 올리기 (성경주석·찬양작곡 등)","☁️",[("file","올릴 파일 경로(주석·찬양곡·자료)","",1),("book","성경책(예: 로마서·롬·히브리서 — 자동 연결)","",0),("notebook","노트북ID(직접 지정할 때만)","",0)]),
  ("출력·파일","read-file","파일 읽기(TXT/DOCX)","📄",[("file","파일 경로","",1)]),
  ("시스템","why","✨ 이 프로그램의 강점","✨",[],"교인정보 보안·데이터 통합·전문가급 재정 등, 이 프로그램만의 강점을 한눈에 봅니다. 작은 교회 목사님을 위한 정성입니다."),
  ("시스템","setup","⛪ 우리 교회 이름 설정 (맨 처음 한 번)","⛪",[("church","우리 교회 이름","예: 은혜교회",1),("pastor","담임 목사님 성함","예: 홍길동 목사",0)],"교회명·담임명만 넣으면 모든 문서·주보·증명서·축하 문자에 자동으로 들어갑니다. 어려운 설정 파일을 직접 여실 필요가 없어요."),
+ ("시스템","phone-setup","📱 폰 접속 설정 (핸드폰으로 보기)","📱",[("pw","새 비밀번호 (6자 이상 · 안 바꾸시면 비워 두세요)","",0),("pw2","비밀번호 다시 한 번 (확인용)","",0),("on","폰 접속 (켜기 / 끄기)","",0),("way","접속 방식 (와이파이 / 사설망 · 안 바꾸시면 비워 두세요)","",0),("logoutall","폰을 잃어버리셨다면 1 (폰·바깥 기기 모두 로그아웃)","",0)],"핸드폰에서도 이 프로그램을 그대로 쓰실 수 있게 합니다. ▸다 비우고 실행하면 지금 상태와 '폰에서 칠 주소'를 보여 드립니다. ▸먼저 비밀번호를 하나 정하시고, 그 다음 '폰 접속'에 켜기를 넣으세요(비밀번호 없이는 열리지 않습니다 — 같은 와이파이의 누구나 교인 명부를 보게 되기 때문입니다). ▸켜신 뒤에는 프로그램을 한 번 껐다 켜 주세요. ▸폰에서는 처음 한 번만 비밀번호를 넣으시면 그 뒤로는 바로 열립니다(「이 폰 기억하기」를 켜 두시면 약 30일 · 끄시면 브라우저를 닫을 때까지만 — 빌린 기기로 잠깐 보실 때 꺼 주세요). ▸비밀번호를 여러 번 틀리면 ★잠기는 것이 아니라 답이 점점 늦어집니다(최대 1분) — 맞는 비밀번호를 넣으시면 그대로 들어가집니다. ▸★이 비밀번호가 막아 주는 것은 '같은 와이파이의 다른 사람이 우연히 열어 보는 것'입니다. 지금 연결은 암호화(https)가 아니라서 작정하고 엿보면 비밀번호가 보일 수 있습니다 — ★카페·공항 같은 공용 와이파이에서는 쓰지 마세요. ▸사무실 컴퓨터에서 쓰실 때는 지금까지처럼 아무것도 묻지 않습니다. ▸「폰을 잃어버리셨다면 1」을 실행하시면 폰·바깥 기기가 모두 끊깁니다 — 지금 보고 계신 폰에서 누르셨다면 그 폰에서도 비밀번호를 다시 넣으셔야 합니다. 사무실 컴퓨터는 그대로 쓰실 수 있습니다."),
  ("시스템","set-backup","USB·D 백업 (설정 & 지금 저장)","📦",[("path","저장 폴더(예: E:\\교회백업 · 비우면 설정된 폴더로 지금 저장)","",0)],"저장 폴더를 넣으면 자동저장 폴더로 설정하고 즉시 전체 저장합니다. 비우면 이미 설정된 폴더로 지금 전체 저장. USB·D폴더에 안전 이중보관."),
  ("시스템","backup","자료 백업","💾",[]),
  ("시스템","phoenix","🔥 피닉스 복구","🔥",[("last","최근으로 복구하려면 1","",0)]),
@@ -360,7 +869,7 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
   .notif-item .ni-tx s{text-decoration:none;font-size:12px;color:var(--muted);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ni-ic.bd{background:var(--warn-bg);color:var(--warn)}.ni-ic.cr{background:var(--crit-bg);color:var(--crit)}.ni-ic.nw{background:var(--good-bg);color:var(--good)}.ni-ic.vs{background:var(--brand-soft);color:var(--brand)}
   .notif-empty{padding:14px 10px 20px;color:var(--muted);font-size:13.5px;text-align:center}
-  @media (max-width:900px){.app{grid-template-columns:1fr}.side{display:none}.stats{grid-template-columns:repeat(2,1fr)}.search{width:auto;flex:1}.top{padding:15px 20px}.wrap{padding:26px 20px 48px}}
+  
 
   /* ── 실행 모달·입력폼·결과 (기존 JS 기능 유지 · 프리미엄 토큰 적용) ── */
   .modal{position:fixed;inset:0;background:rgba(10,12,20,.55);backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:18px;z-index:20}
@@ -382,6 +891,14 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
   .out.on{display:block}
   .out.ok{border-color:var(--good)}
   .fileopen{display:block;width:100%;text-align:left;margin:8px 0;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:11px;cursor:pointer;color:var(--ink);font-size:14.5px;font-weight:700;font-family:inherit;transition:.14s}
+/* 결과 속 전화·주소 — 눌러서 바로 걸고 바로 길찾기 */
+.lk{display:inline-flex;align-items:center;min-height:34px;padding:3px 10px;margin:2px 1px;border-radius:9px;
+ text-decoration:none;font-weight:700;border:1px solid var(--line);background:var(--surface)}
+.lk.tel{color:var(--brand)}.lk.map{color:var(--accent)}
+.rnote{color:var(--muted);padding:2px 0}
+a.fileopen.getlink{text-decoration:none;color:var(--brand)}
+.only-phone{display:none}   /* 폰 전용 문구 — 폰 규칙에서 다시 켠다 */
+@media (max-width:900px){.lk{min-height:44px;padding:6px 13px;font-size:15px}}
   .fileopen:hover{border-color:var(--brand);background:var(--surface-2);transform:translateX(3px)}
   .foot{text-align:center;color:var(--muted);font-size:13.5px;margin:44px 0 14px;line-height:1.9}
   .foot b{color:var(--ink);font-weight:700}
@@ -440,6 +957,100 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
   .cal-ev.imp{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .cal-litur{font-size:10px;font-weight:700;margin-top:2px;padding:1.5px 5px;border-radius:6px;background:var(--accent-soft);color:var(--accent);white-space:normal;line-height:1.3}
   .cal-hint{font-size:12px;color:var(--muted);margin-top:13px;text-align:center;line-height:1.6}
+/* ★이 폰 블록은 ★스타일 맨 끝에 둔다 — 앞에 두면 뒤에 나오는 기본 규칙(.f·.row 등)이
+   같은 우선순위로 덮어써서 ★조용히 안 먹는다. 실제로 첫 판에서 입력창 16px 과
+   단추 간격이 그렇게 무시됐다(실험대가 잡았다). 새 폰 규칙은 ★여기 아래에 더한다. */
+/* ── 폰 화면 ──────────────────────────────────────────────────────────
+   ★재는 자(尺): 손가락 44px · 입력 글자 16px(그보다 작으면 아이폰이 화면을 확대한다) ·
+     가로 스크롤 0 · 주요 조작은 ★엄지가 닿는 아래쪽.
+   ★머리줄이 한 줄에 다 못 들어가면 ★줄바꿈한다 — 안 그러면 사파리에서 화면이 옆으로 밀린다
+     (크롬에서는 안 보이고 아이폰에서만 보이던 결함이라, 두 엔진으로 재서 잡았다). */
+@media (max-width:900px){
+ .app{grid-template-columns:1fr}.side{display:none}
+ .stats{grid-template-columns:repeat(2,1fr)}
+ .top{padding:11px 14px;gap:9px;flex-wrap:wrap}
+ .top>div:first-child{flex:0 0 auto}
+ .top h1{font-size:19px}
+ .date{display:none}                        /* 자리를 크게 먹는 장식 — 폰에서는 접는다 */
+ .search{order:10;flex:1 0 100%;width:auto;margin-left:0;padding:12px 14px}
+ .kbd{display:none}                         /* 폰에는 Ctrl 키가 없다 — 없는 것을 가리키지 않는다 */
+ .icobtn{width:44px;height:44px}
+ .upd{padding:12px 14px;min-height:44px}
+ .quit{min-height:44px;padding:12px 24px}
+ .wrap{padding:22px 16px 108px}             /* 아래쪽 이동바에 마지막 카드가 가리지 않게 */
+ .grid{grid-template-columns:1fr;gap:13px;margin-bottom:26px}
+ .card{padding:17px 17px 16px}
+ .card p{font-size:14px;line-height:1.6}    /* 폰에서 읽히는 크기 */
+ .sec-h{scroll-margin-top:66px}
+ .modal{padding:0;align-items:flex-end}
+ .sheet{max-width:none;border-radius:18px 18px 0 0;max-height:92vh;padding:22px 18px calc(20px + env(safe-area-inset-bottom))}
+ .f{font-size:16px;padding:14px 15px}       /* ★16px 미만이면 아이폰이 확대한다 */
+ .search{padding:6px 14px}
+ #search{font-size:16px;min-height:44px}    /* 검색칸도 같은 자(尺)로 — 손가락 44px · 글자 16px */
+ .out{font-size:14.5px}
+ /* ★[닫기]와 [실행]을 손가락 하나 거리에 두지 않는다 — 잘못 눌러 쓰던 내용이 날아가면 안 된다 */
+ .row{flex-direction:column;gap:26px;margin-top:22px}
+ .row .b{width:100%;min-height:52px;font-size:16px}
+ /* ★엄지가 닿는 ★아래쪽에 오는 것은 [실행]이어야 한다. 처음에 순서를 거꾸로 넣었더니
+    [닫기]가 제일 누르기 쉬운 자리에 앉았다 — 하려던 것과 정확히 반대였다(실험대가 잡았다). */
+ .row .b.cancel{order:1;min-height:46px;font-size:15px;opacity:.9}
+ .row .b.go{order:2}
+ /* ★[실행]을 창 바닥에 붙여 둔다 — 칸이 많은 카드(교우 등록은 칸이 스무 개 가까이다)에서는
+    단추가 화면 두 배 아래에 있어 ★한참 굴려야 나왔다. 심방지에서 그 한 번이 번거롭다.
+    ★자판이 올라와도 가려지지 않는다. [닫기]와의 26px 간격과 순서(실행이 아래)는 그대로 둔다. */
+ /* ★간격은 26px 을 지킨다 — 바닥에 붙이면서 촘촘하게 만들고 싶은 마음이 들지만,
+    [닫기]와 [실행]이 손가락 하나 거리에 붙으면 안 된다는 쪽이 우선이다.
+    (처음에 14px 로 줄였다가 회귀 시험이 잡았다 — 붙여 놓고 잘못 누르시면 쓰던 내용이 날아간다.) */
+ #mact{position:sticky;bottom:0;z-index:3;margin-top:16px;padding:12px 0 6px;
+   background:var(--surface);border-top:1px solid var(--line-2);gap:26px}
+ #mact .b.cancel{min-height:44px;opacity:.85}
+ .home{display:none!important}              /* 아래 이동바가 그 일을 대신한다 */
+}
+/* 아래쪽 이동바 — 엄지가 닿는 자리. 폰에서만 나온다. */
+.tabbar{display:none}
+@media (max-width:900px){
+ .tabbar{display:grid;grid-template-columns:repeat(3,1fr);position:fixed;left:0;right:0;bottom:0;z-index:19;
+   background:color-mix(in srgb,var(--paper) 94%,transparent);backdrop-filter:blur(10px);
+   border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+ .tabbar button{background:none;border:0;font-family:inherit;color:var(--muted);cursor:pointer;
+   min-height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+   font-size:12px;font-weight:700;padding:6px 4px}
+ .tabbar button b{font-size:19px;font-weight:400;line-height:1}
+ .tabbar button.on{color:var(--brand)}
+ .gsheet{position:fixed;inset:0;z-index:21;display:none;background:rgba(10,12,20,.5);backdrop-filter:blur(5px)}
+ .gsheet.on{display:block}
+ .gsheet .gs-in{position:absolute;left:0;right:0;bottom:0;max-height:78vh;overflow:auto;
+   background:var(--surface);border-top:1px solid var(--line);border-radius:18px 18px 0 0;
+   padding:16px 14px calc(18px + env(safe-area-inset-bottom))}
+ .gsheet h3{font-size:16px;margin:2px 4px 12px;color:var(--ink)}
+ .gsheet a{display:flex;align-items:center;gap:11px;min-height:52px;padding:8px 12px;border-radius:12px;
+   color:var(--ink);text-decoration:none;font-size:15.5px;font-weight:700;border:1px solid var(--line-2);margin-bottom:8px}
+ .gsheet a .gi{font-size:19px}
+ .gsheet a .gc{margin-left:auto;font-size:12.5px;color:var(--muted);font-weight:600}
+ /* ★화면 문구가 화면과 어긋나지 않게 — 폰에는 왼쪽 메뉴가 없다.
+    없는 것을 가리키면 목사님은 그 없는 것을 찾으신다. */
+ .only-pc{display:none}
+ .only-phone{display:inline}
+ /* ★열리는 판(테마·알림)이 화면 밖으로 잘려나가지 않게 — 오른쪽 끝 단추에 붙어 열리므로
+    좁은 화면에서는 판의 오른쪽이 통째로 잘렸다(요소 22~24개가 화면 밖이었다). */
+ .themepanel,.notifpanel{position:fixed;top:auto;bottom:calc(58px + env(safe-area-inset-bottom));
+   left:10px;right:10px;width:auto;max-height:62vh;overflow:auto}
+ .themepanel .tp-row{flex-wrap:wrap}
+ .themepanel button,.notifpanel button{min-height:44px}
+ /* ★큰 표는 가로로 스크롤되게 담는다 — 담는 그릇이 없으면 표가 화면을 밀거나 잘린다 */
+ .calsheet,.finsheet{max-width:none}
+ .cal-grid{min-width:322px}
+ #fin_body{overflow-x:auto;-webkit-overflow-scrolling:touch}
+ #fin_body table,.finsheet table{min-width:520px}
+}
+/* ★아이폰 사파리는 주소창 때문에 100vh 가 ★실제로 보이는 높이보다 크다 —
+   그 차이만큼 화면 아래가 잘린다. 특히 ★로그인 화면이 잘리면 심방지에서 못 들어가신다.
+   dvh(실제로 보이는 높이)를 쓰되, 모르는 브라우저를 위해 100vh 를 먼저 적어 둔다. */
+@supports (height:100dvh){
+ .app{min-height:100dvh}
+ .side{height:100dvh}
+ .loginwrap{min-height:100dvh}
+}
 </style></head><body>
 <div class="app">
   <aside class="side">
@@ -496,7 +1107,7 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
       <div class="lede">
         <div>
           <h2>평안하세요, 목사님 🙏</h2>
-          <p>필요한 기능을 바로 실행하세요. 왼쪽 메뉴에서 분류로 이동할 수 있습니다.</p>
+          <p>필요한 기능을 바로 실행하세요. <span class="only-pc">왼쪽 메뉴에서 분류로 이동할 수 있습니다.</span><span class="only-phone">아래 「☰ 분류」를 누르면 분류로 바로 이동합니다.</span></p>
         </div>
       </div>
 
@@ -537,6 +1148,16 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
     </div>
   </div>
 </div>
+<!-- 폰 아래쪽 이동바 — 사이드바가 접히는 폭에서 그 자리를 대신한다.
+     ★엄지가 닿는 아래쪽에 둔다(차에서 내리며 한 손으로 쓰신다). -->
+<nav class="tabbar" id="tabbar">
+  <button onclick="goHome()" title="처음 화면"><b>🏠</b>처음</button>
+  <button onclick="focusSearch()" title="검색"><b>🔎</b>검색</button>
+  <button onclick="openGroups()" id="tab_g" title="분류로 이동"><b>☰</b>분류</button>
+</nav>
+<div class="gsheet" id="gsheet" onclick="if(event.target.id==='gsheet')closeGroups()">
+  <div class="gs-in"><h3>어디로 갈까요</h3><div id="gs_list"></div></div>
+</div>
 <div class="modal" id="welcome"><div class="sheet">
  <h2>👋 환영합니다, 목사님!</h2><div class="sub">__CHURCH__ 교회 종합행정</div>
  <p>위쪽 <b>카드</b>를 누르면 바로 사용됩니다. 만든 문서는 번호 폴더에 자동 정리되고, 입력한 자료는 <b>영구 보존</b>됩니다. 처음이시면 아래 <b>사용 설명서</b>를 먼저 만들어 읽어보세요.</p>
@@ -545,7 +1166,7 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
 </div></div>
 <div class="modal" id="modal"><div class="sheet">
  <h2 id="mt"></h2><div class="sub" id="ms"></div><div id="mf"></div>
- <div class="row"><button class="b cancel" onclick=closeM()>닫기</button><button class="b go" id="mgo">실행</button></div>
+ <div class="row" id="mact"><button class="b cancel" onclick=closeM()>닫기</button><button class="b go" id="mgo">실행</button></div>
  <div class="row" style="margin-top:6px"><button class="b cancel" id="mprev" onclick="browsePrev(this)" style="flex:1;font-size:.92em">📂 지난 자료 찾기 — 내 PC(C·D·USB)에서 예전 작업 열기</button></div>
  <div class="out" id="mo"></div>
 </div></div>
@@ -575,9 +1196,16 @@ PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
 <button class="home" id="homebtn" onclick="goHome()">⌂ 전체 메뉴</button>
 <script>
 var A=__ACTIONS__;
+var REMOTE=__REMOTE__;   // 폰·바깥 기기에서 열었는가(사무실 컴퓨터면 false)
+// ★폰에서는 '지난 자료 찾기(내 PC 열기)' 단추를 ★내지 않는다.
+//   눌러도 사무실 컴퓨터의 탐색기가 열릴 뿐 폰에는 아무 일도 일어나지 않는다(서버가 막는다).
+//   게다가 이 단추는 서버 응답을 보지 않고 언제나 '📂 내 PC 열림' 이라고 적어서
+//   ★안 된 일을 됐다고 말했다(2026-08-17 적발). 안 되는 것은 보여 주지 않는다.
+if(REMOTE){try{var _mp=document.getElementById('mprev');
+ if(_mp)(_mp.parentNode||_mp).style.display='none';}catch(e){}}
 var HIDDEN=__HIDDEN__;var editMode=false;
 function toggleEdit(){editMode=!editMode;var b=document.getElementById('tidybtn');if(b)b.textContent=editMode?'✓ 정리 끝내기':'🧹 화면 정리';render((document.getElementById('q')||{}).value||'');}
-function cardVis(cmd,hide){fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'card-vis',args:{name:cmd,act:hide?'hide':'show'}})}).then(function(){if(hide){if(HIDDEN.indexOf(cmd)<0)HIDDEN.push(cmd);}else{HIDDEN=HIDDEN.filter(function(x){return x!==cmd;});}render((document.getElementById('q')||{}).value||'');});}
+function cardVis(cmd,hide){fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'card-vis',args:{name:cmd,act:hide?'hide':'show'}})}).then(function(){if(hide){if(HIDDEN.indexOf(cmd)<0)HIDDEN.push(cmd);}else{HIDDEN=HIDDEN.filter(function(x){return x!==cmd;});}render((document.getElementById('q')||{}).value||'');});}
 var NETERR='⚠ 프로그램 서버에 연결할 수 없습니다.'+String.fromCharCode(10)+'★ 교회행정 시작 파일을 다시 더블클릭(실행)한 뒤,'+String.fromCharCode(10)+'이 창을 새로고침(F5)하고 다시 눌러주세요.';
 function isNet(e){var s=String(e);return s.indexOf('fetch')>=0||s.indexOf('Failed')>=0||s.indexOf('NetworkError')>=0;}
 var COLORS={"목양":"#10b981","예배·설교":"#f43f5e","성례":"#0ea5e9","성경자료":"#6366f1","목회 참고자료":"#8b5cf6","다음세대(주일학교)":"#ec4899","영성":"#7c3aed","찬양":"#8b5cf6","영상·홍보":"#c026d3","사역":"#f59e0b","전도":"#16a34a","선교":"#0d9488","재정":"#3b82f6","행정서식":"#0891b2","출력·파일":"#14b8a6","시스템":"#64748b"};
@@ -595,6 +1223,24 @@ function buildNav(){var nav=document.getElementById('nav');if(!nav)return;nav.in
 }
 function navGo(i){var s=document.getElementById('search');if(s)s.value='';render('');setNav(i);
  var el=document.getElementById('sec'+i);if(el)el.scrollIntoView({behavior:'smooth',block:'start'});_toggleHome();}
+// ── 폰 아래쪽 이동바 ──────────────────────────────────────────────
+// 사이드바가 접히면 분류로 갈 길이 없어진다. 카드가 116개라 처음부터 훑으면
+// 화면을 25,000px 넘게 내리셔야 한다 — 그래서 아래쪽에 분류 시트를 둔다.
+function buildGroupSheet(){var w=document.getElementById('gs_list');if(!w)return;w.innerHTML='';
+ GROUPS.forEach(function(g,i){
+  var n=A.filter(function(a){return a[0]===g && HIDDEN.indexOf(a[1])<0;}).length;
+  if(!n)return;
+  var a=document.createElement('a');a.href='javascript:void(0)';
+  a.innerHTML='<span class="gi">'+(GROUP_ICON[g]||'•')+'</span><span>'+esc(g)+'</span><span class="gc">'+n+'개</span>';
+  a.onclick=function(){closeGroups();navGo(i);};
+  w.appendChild(a);});
+}
+function openGroups(){buildGroupSheet();document.getElementById('gsheet').classList.add('on');_pushStep();
+ var t=document.getElementById('tab_g');if(t)t.className='on';}
+function closeGroups(){document.getElementById('gsheet').classList.remove('on');
+ var t=document.getElementById('tab_g');if(t)t.className='';}
+function focusSearch(){var s=document.getElementById('search');if(!s)return;
+ window.scrollTo({top:0,behavior:'smooth'});setTimeout(function(){s.focus();},250);}
 function render(q){
  app.innerHTML='';q=(q||'').toLowerCase();
  GROUPS.forEach(function(g){
@@ -686,7 +1332,7 @@ function runQuick(cmd,args,title){
  _setTx('mt',title||cmd);_setTx('ms','');document.getElementById('mf').innerHTML='';
  var o=document.getElementById('mo');o.className='out on';o.textContent='실행 중...';
  document.getElementById('modal').classList.add('on');
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:cmd,args:args})})
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:cmd,args:args})})
   .then(function(r){return r.text();}).then(function(t){o.className='out on ok';renderOut(o,t);loadStats();})
   .catch(function(e){o.className='out on';o.textContent=isNet(e)?NETERR:'오류: '+e;});
 }
@@ -787,16 +1433,32 @@ function goHome(){var s=document.getElementById('search');if(s)s.value='';render
 function _toggleHome(){var h=document.getElementById('homebtn');if(!h)return;var s=document.getElementById('search');h.className=((window.pageYOffset>240)||(s&&s.value.trim()!==''))?'home on':'home';}
 window.addEventListener('scroll',_toggleHome);
 var cur=null;
+var DRAFT={};      // {명령: {칸이름: 쓰시던 값}} — 화면 안에서만 산다(저장 파일 아님)
+// ★폰의 뒤로가기 — 눌러도 프로그램에서 나가지 않고 열린 창만 닫는다.
+//   폰에서는 뒤로가기가 곧 취소 단추라, 그대로 두면 심방 중에 쓰시던 내용이 통째로 날아간다.
+window.addEventListener('popstate',function(){
+ var g=document.getElementById('gsheet');
+ if(g&&g.classList.contains('on')){closeGroups();return;}
+ var ids=['modal','calmodal','finmodal','whymodal','welcome'];
+ for(var i=0;i<ids.length;i++){var m=document.getElementById(ids[i]);
+  if(m&&m.classList.contains('on')){m.classList.remove('on');return;}}
+});
+function _pushStep(){try{history.pushState({step:1},'');}catch(e){}}
 function openM(a){if(a[1]==='why'){openWhy();return;}if(a[1]==='cal-open'){openCal();return;}if(a[1]==='finance-chart'){openFinance();return;}cur=a;document.getElementById('mt').textContent=a[3]+' '+a[2];
  document.getElementById('ms').textContent=a[1];
  var mf=document.getElementById('mf');mf.innerHTML='';
  a[4].forEach(function(f){var n=f[0],label=f[1],ph=f[2],req=f[3];
   var l=document.createElement('label');l.textContent=label+(req?' *':'');mf.appendChild(l);
   var big=(n==='lyrics'||n==='note'||n==='body'||n==='notice'||n==='week'||n==='goal'||n==='purpose');
-  var inp=document.createElement(big?'textarea':'input');inp.className='f';inp.id='fld_'+n;inp.placeholder=ph;mf.appendChild(inp);
+  var inp=document.createElement(big?'textarea':'input');inp.className='f';inp.id='fld_'+n;inp.placeholder=ph;
+  // ★쓰시던 내용을 기억한다 — 폰에서 뒤로가기를 누르거나 실수로 닫아도 날아가면 안 된다.
+  //   (남의 집 문 앞에서 다시 타이핑하시게 만들지 않는다. 실행에 성공하면 지운다.)
+  if(DRAFT[a[1]]&&DRAFT[a[1]][n])inp.value=DRAFT[a[1]][n];
+  inp.oninput=function(){if(!DRAFT[a[1]])DRAFT[a[1]]={};DRAFT[a[1]][n]=inp.value;};
+  mf.appendChild(inp);
  });
  var o=document.getElementById('mo');o.className='out';o.textContent='';
- document.getElementById('modal').classList.add('on');
+ document.getElementById('modal').classList.add('on');_pushStep();
 }
 function closeM(){document.getElementById('modal').classList.remove('on');}
 var calY,calM;
@@ -888,11 +1550,11 @@ function addEvent(d){
  var ym=calY+'-'+('0'+calM).slice(-2)+'-'+('0'+d).slice(-2);
  var t=prompt(ym+' — 일정 제목을 적으세요 (중요한 날은 앞에 ★):');
  if(!t)return;var imp='';if(t.indexOf('★')===0){imp='1';t=t.replace('★','').replace(/^ +/,'');}
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'event-add',args:{date:ym,title:t,important:imp}})}).then(function(){renderCal();if(typeof loadStats==='function')loadStats();});
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'event-add',args:{date:ym,title:t,important:imp}})}).then(function(){renderCal();if(typeof loadStats==='function')loadStats();});
 }
 function delEvent(e,id,title){
  e.stopPropagation();if(!confirm('"'+title+'" 일정을 삭제할까요?'))return;
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'event-del',args:{id:id}})}).then(function(){renderCal();if(typeof loadStats==='function')loadStats();});
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'event-del',args:{id:id}})}).then(function(){renderCal();if(typeof loadStats==='function')loadStats();});
 }
 function calPrint(){var ym=calY+'-'+('0'+calM).slice(-2);closeCal();runQuick('cal-print',{month:ym},calY+'년 '+calM+'월 일정 달력 인쇄');}
 document.getElementById('mgo').onclick=function(){
@@ -900,44 +1562,95 @@ document.getElementById('mgo').onclick=function(){
  var o=document.getElementById('mo');
  if(miss){o.className='out on';o.textContent='⚠ "'+miss+'" 칸을 먼저 입력해 주세요.';return;}
  o.className='out on';o.textContent='실행 중...';
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:cur[1],args:args})})
-  .then(function(r){return r.text();}).then(function(t){o.className='out on ok';renderOut(o,t);loadStats();})
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:cur[1],args:args})})
+  .then(function(r){return r.text();}).then(function(t){o.className='out on ok';DRAFT[cur[1]]=null;renderOut(o,t);loadStats();})
   .catch(function(e){o.className='out on';o.textContent=isNet(e)?NETERR:'오류: '+e;});
 };
 function baseName(p){var a=p.split('/');p=a[a.length-1];var b=p.split(String.fromCharCode(92));return b[b.length-1];}
 function findPath(line){var low=line.toLowerCase();var exts=['.docx','.hwp','.hwpx','.xlsx','.pptx','.pdf','.txt'];var end=-1,el=0;
- for(var i=0;i<exts.length;i++){var p=low.lastIndexOf(exts[i]);if(p>end){end=p;el=exts[i].length;}}
+ // ★같은 자리면 ★긴 확장자가 이긴다(.hwp 가 .hwpx 의 x 를 잘라먹지 않게) — 서버쪽 _srv_findpath 와 한 쌍이다
+ for(var i=0;i<exts.length;i++){var p=low.lastIndexOf(exts[i]);
+  if(p>=0&&(p>end||(p===end&&exts[i].length>el))){end=p;el=exts[i].length;}}
  if(end<0)return null;end+=el;var start=-1;
  for(var j=end-1;j>0;j--){var c=line.charAt(j),pv=line.charAt(j-1);if(c===':'&&((pv>='A'&&pv<='Z')||(pv>='a'&&pv<='z'))){start=j-1;break;}}
  if(start<0)return null;return line.substring(start,end);}
 function parentDir(p){var i=Math.max(p.lastIndexOf('/'),p.lastIndexOf(String.fromCharCode(92)));return i>0?p.substring(0,i):p;}
 function addOpen(o,path,label,icon,tail){var b=document.createElement('button');b.className='fileopen';b.textContent=(icon||'📂')+' '+(label||baseName(path))+(tail||' — 눌러서 열기');b.onclick=function(){openPath(path,b);};o.appendChild(b);}
 function addRun(o,cmd,args,label){var b=document.createElement('button');b.className='fileopen';b.textContent=label||cmd;b.onclick=function(){runQuick(cmd,args,label||cmd);};o.appendChild(b);}
-function renderOut(o,t){o.innerHTML='';(t||'완료').split(String.fromCharCode(10)).forEach(function(line){
+// ★전화번호와 주소는 ★눌러서 바로 되게 한다.
+//   폰이 PC 와 다른 가장 큰 이유가 이것이다. 번호를 눈으로 읽고 손으로 옮겨 적게 하면
+//   그건 PC 화면을 줄여 놓은 것일 뿐이다. (전화 = 한 번 누르면 걸린다 / 주소 = 지도앱이 열린다)
+// ★역슬래시 기호를 쓰지 않는다 — 이 화면 글은 파이썬 따옴표 안에 살아서,
+//   파이썬이 그것을 자기 탈출문자로 읽고 경고를 낸다(앞으로는 오류가 될 수 있다).
+//   그래서 같은 뜻을 [0-9]·[ ] 로 적는다.
+var TELRE=/(0[0-9]{1,2}[-. ]?[0-9]{3,4}[-. ]?[0-9]{4})/g;
+var ADDRRE=/((?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)[^ ]*(?:[ ]+[^ ]+){1,6}?(?:로|길|동|리|가)[ ]*[0-9][0-9-]*(?:[ ]*[^ ,]{0,12}(?:아파트|빌라|타워|맨션|오피스텔|호|동))?)/g;
+function _mkTel(num){var a=document.createElement('a');a.className='lk tel';
+ a.href='tel:'+num.replace(/[^0-9+]/g,'');a.textContent='📞 '+num;return a;}
+function _mkMap(addr){var a=document.createElement('a');a.className='lk map';
+ a.href='https://map.kakao.com/link/search/'+encodeURIComponent(addr);
+ a.target='_blank';a.rel='noopener';a.textContent='📍 '+addr;return a;}
+function linkify(d,line){
+ // 한 줄을 [보통글자 · 전화 · 주소] 조각으로 쪼갠다. 조각은 ★요소로 만든다(문자열로 붙이지 않는다).
+ var marks=[],m;
+ TELRE.lastIndex=0;while((m=TELRE.exec(line))!==null)marks.push([m.index,m.index+m[0].length,'tel',m[0]]);
+ ADDRRE.lastIndex=0;while((m=ADDRRE.exec(line))!==null)marks.push([m.index,m.index+m[0].length,'map',m[0]]);
+ marks.sort(function(x,y){return x[0]-y[0];});
+ var out=[],last=0;
+ marks.forEach(function(k){if(k[0]<last)return;   // 겹치면 앞의 것만 쓴다
+  out.push([last,k[0],null]);out.push([k[0],k[1],k]);last=k[1];});
+ if(!out.length){d.textContent=line;return false;}
+ out.push([last,line.length,null]);
+ out.forEach(function(seg){
+  var txt=line.substring(seg[0],seg[1]);if(!txt)return;
+  if(seg[2])d.appendChild(seg[2][2]==='tel'?_mkTel(seg[2][3]):_mkMap(seg[2][3]));
+  else d.appendChild(document.createTextNode(txt));});
+ return true;
+}
+// ★폰으로 받는 단추 — 주소에 ★번호표만 들어간다(경로가 아니다).
+//   경로는 서버만 알고, 서버가 검사한 것만 번호표가 된다.
+function addGet(o,tid,name){var a=document.createElement('a');a.className='fileopen getlink';
+ a.href='/download?id='+encodeURIComponent(tid);a.setAttribute('download',name);
+ a.textContent='📥 '+name+' — 눌러서 내려받기';o.appendChild(a);}
+function renderOut(o,t){o.innerHTML='';
+ // 받기 단추가 하나라도 있으면, 아래 '사무실에 저장되었습니다' 안내는 겹치므로 내지 않는다
+ var hasGet=/^▶받기[|]/m.test(t||'');
+ (t||'완료').split(String.fromCharCode(10)).forEach(function(line){
+  var rg=line.match(/^▶받기[|](.+?)[|](.+)$/);
+  if(rg){addGet(o,rg[1],rg[2]);return;}
   var m=line.match(/^▶열기[|](.+?)[|](.+)$/);
   if(m){addOpen(o,m[1],m[2],'📂','');return;}
   var rc=line.match(/^▶실행[|](.+?)[|](.*?)[|](.+)$/);
   if(rc){var ar={};rc[2].split(',').forEach(function(kv){var kp=kv.split('=');if(kp[0])ar[kp[0].trim()]=(kp.slice(1).join('=')||'').trim();});addRun(o,rc[1],ar,rc[3]);return;}
-  var d=document.createElement('div');d.textContent=line;o.appendChild(d);
+  var d=document.createElement('div');linkify(d,line);o.appendChild(d);
   var fp=findPath(line);
-  if(fp){addOpen(o,fp,null,'📂',' — 이 문서 열기');addOpen(o,parentDir(fp),'이 파일이 있는 폴더','🗂️',' 열기');}
+  // ★폰에서는 이 단추를 만들지 않는다 — 파일을 여는 것은 ★사무실 컴퓨터에서만 되는 일이라,
+  //   폰에 띄우면 눌러도 아무 일이 없다. 안 되는 것을 된다고 적지 않는다.
+  if(fp&&!REMOTE){addOpen(o,fp,null,'📂',' — 이 문서 열기');addOpen(o,parentDir(fp),'이 파일이 있는 폴더','🗂️',' 열기');}
+  else if(fp&&REMOTE&&!hasGet){var n=document.createElement('div');n.className='rnote';
+   n.textContent='📄 '+baseName(fp)+' — 사무실 컴퓨터에 저장되었습니다.';o.appendChild(n);}
 });}
 function openPath(p,btn){if(btn)btn.textContent='📂 '+baseName(p)+' 여는 중...';
-  fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'open-file',args:{file:p}})})
+  fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'open-file',args:{file:p}})})
    .then(function(r){return r.text();}).then(function(t){if(btn)btn.textContent='📂 '+baseName(p)+' — '+(t.indexOf('여는')>=0?'열렸습니다':t.slice(0,40));}).catch(function(e){if(btn)btn.textContent=isNet(e)?'⚠ 서버 꺼짐 — ★교회행정 시작 다시 실행':'오류';});
 }
-function browsePrev(btn){var L='📂 지난 자료 찾기 — 내 PC(C·D·USB)에서 예전 작업 열기';if(btn)btn.textContent='📂 내 PC 여는 중...';
-  fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'open-file',args:{file:'shell:MyComputerFolder'}})})
-   .then(function(r){return r.text();}).then(function(){if(btn){btn.textContent='📂 내 PC 열림 — C·D·USB에서 예전 자료를 찾으세요';setTimeout(function(){btn.textContent=L;},4500);}}).catch(function(e){if(btn)btn.textContent=isNet(e)?'⚠ 서버 꺼짐 — ★교회행정 시작 다시 실행':'오류';});
+function browsePrev(btn){var L='📂 지난 자료 찾기 — 내 PC(C·D·USB)에서 예전 작업 열기';
+  // ★폰이면 아예 하지 않고 사실대로 말한다(단추는 위에서 숨겼지만, 숨김이 뚫려도 거짓말은 안 하게).
+  if(REMOTE){if(btn){btn.textContent='이 기능은 사무실 컴퓨터에서만 됩니다';setTimeout(function(){btn.textContent=L;},3500);}return;}
+  if(btn)btn.textContent='📂 내 PC 여는 중...';
+  fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'open-file',args:{file:'shell:MyComputerFolder'}})})
+   // ★응답을 ★보고 나서 말한다 — 종전엔 막혔든 말든 '내 PC 열림'이라고 적었다.
+   .then(function(r){return r.text().then(function(t){return {ok:r.ok,t:t};});})
+   .then(function(x){if(btn){btn.textContent=x.ok?'📂 내 PC 열림 — C·D·USB에서 예전 자료를 찾으세요':'⚠ 열지 못했습니다';setTimeout(function(){btn.textContent=L;},4500);}}).catch(function(e){if(btn)btn.textContent=isNet(e)?'⚠ 서버 꺼짐 — ★교회행정 시작 다시 실행':'오류';});
 }
 document.getElementById('modal').onclick=function(e){if(e.target.id==='modal')closeM();};
 function closeW(){document.getElementById('welcome').classList.remove('on');try{localStorage.setItem('seen2','1');}catch(e){}}
 function makeManual(){var o=document.getElementById('wout');o.className='out on';o.textContent='설명서 만드는 중...';
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'manual',args:{}})})
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'manual',args:{}})})
   .then(function(r){return r.text();}).then(function(t){o.className='out on ok';o.textContent=t+' — 01 교회 기본·조직 폴더에서 [사용설명서] 파일을 여세요.';})
   .catch(function(e){o.textContent=isNet(e)?NETERR:'오류: '+e;});}
 function quitApp(){if(!confirm('프로그램을 종료할까요?'))return;
- fetch('/shutdown',{method:'POST'}).catch(function(){});
+ fetch('/shutdown',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:'{}'}).catch(function(){});
  document.body.innerHTML='<div style="text-align:center;margin-top:120px;color:#888;font-family:sans-serif"><h1>프로그램이 종료되었습니다 🙏</h1><p>이 인터넷 창을 닫으셔도 됩니다.</p></div>';}
 function tg(){var r=document.documentElement;var cur=r.getAttribute('data-theme');var dark=cur?cur==='dark':matchMedia('(prefers-color-scheme:dark)').matches;r.setAttribute('data-theme',dark?'light':'dark');}
 function toggleThemePanel(e){if(e)e.stopPropagation();var p=document.getElementById('themepanel');if(p){if(!p.classList.contains('on'))loadBgList();p.classList.toggle('on');}}
@@ -958,7 +1671,7 @@ function uploadBg(inp){var f=inp.files&&inp.files[0];if(!f){return;}
  var box=document.getElementById('tp_photos');if(box)box.innerHTML='<span class="tp-empty">사진 올리는 중…</span>';
  var rd=new FileReader();
  rd.onload=function(){
-  fetch('/bgupload',{method:'POST',body:JSON.stringify({name:f.name,data:rd.result})}).then(function(r){return r.json();}).then(function(j){
+  fetch('/bgupload',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({name:f.name,data:rd.result})}).then(function(r){return r.json();}).then(function(j){
    inp.value='';
    if(j&&j.ok){setPhoto(encodeURIComponent(j.name));}
    else{alert('사진 추가에 실패했습니다: '+((j&&j.error)||'알 수 없는 오류'));loadBgList();}
@@ -981,7 +1694,7 @@ function updateApp(){
  document.getElementById('mf').innerHTML='';
  var o=document.getElementById('mo');o.className='out on';o.textContent='최신 버전을 확인하고 있습니다... (인터넷에서 새 파일을 받아옵니다)';
  document.getElementById('modal').classList.add('on');
- fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'update',args:{}})})
+ fetch('/run',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({cmd:'update',args:{}})})
   .then(function(r){return r.text();}).then(function(t){o.className='out on ok';renderOut(o,t);
     if(t.indexOf('업데이트 완료')>=0){setTimeout(function(){location.reload(true);},6000);}})
   .catch(function(e){o.className='out on';o.textContent=isNet(e)?NETERR:'오류: '+e;});
@@ -991,6 +1704,104 @@ function updateApp(){
 try{if(!localStorage.getItem('seen2'))document.getElementById('welcome').classList.add('on');}catch(e){}
 </script>
 </body></html>"""
+
+LOGIN_PAGE = """<!doctype html><html lang=ko><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__CHURCH__ 교회행정</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--paper:#F4F2EC;--surface:#FFFFFF;--ink:#14171C;--muted:#6A7078;--line:#E7E3D8;
+        --brand:#1E3A34;--crit:#B23B3B;
+        --font:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",-apple-system,system-ui,sans-serif}
+  @media (prefers-color-scheme:dark){
+    :root{--paper:#0E1115;--surface:#161A20;--ink:#ECEEF1;--muted:#98A0AA;--line:#252B33;
+          --brand:#6FA898;--crit:#D97C7C}
+  }
+  body{background:var(--paper);color:var(--ink);font-family:var(--font);font-size:16px;line-height:1.6;
+       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 18px}
+  /* ★아이폰 사파리는 주소창 때문에 100vh 가 실제로 보이는 높이보다 크다. 가운데 정렬과 겹치면
+     로그인 상자의 아래쪽이 화면 밖으로 밀린다 — ★심방지에서 못 들어가시는 화면이다.
+     그래서 실제로 보이는 높이(dvh)를 쓴다. 모르는 브라우저는 위의 100vh 를 그대로 쓴다. */
+  @supports (min-height:100dvh){ body{min-height:100dvh} }
+  .box{width:100%;max-width:400px;background:var(--surface);border:1px solid var(--line);
+       border-radius:18px;padding:32px 24px 26px;box-shadow:0 10px 40px rgba(0,0,0,.10)}
+  .mark{width:52px;height:52px;border-radius:14px;background:var(--brand);display:grid;place-items:center;
+        margin:0 auto 18px}
+  .mark svg{width:27px;height:27px}
+  h1{font-size:21px;font-weight:800;text-align:center;letter-spacing:-.3px}
+  .sub{text-align:center;color:var(--muted);font-size:14px;margin-top:7px;line-height:1.55}
+  label{display:block;font-size:14px;font-weight:700;color:var(--muted);margin:24px 0 8px}
+  input{width:100%;padding:15px 16px;border-radius:12px;border:1px solid var(--line);
+        background:var(--paper);color:var(--ink);font-size:17px;font-family:inherit;min-height:52px}
+  input:focus{outline:0;border-color:var(--brand)}
+  button{width:100%;margin-top:18px;padding:16px;min-height:54px;border:0;border-radius:12px;
+         background:var(--brand);color:#fff;font-size:17px;font-weight:800;font-family:inherit;cursor:pointer}
+  button:disabled{opacity:.6}
+  .msg{margin-top:14px;color:var(--crit);font-size:14.5px;text-align:center;line-height:1.55;min-height:1px}
+  .note{margin-top:22px;padding-top:18px;border-top:1px solid var(--line);
+        color:var(--muted);font-size:13px;line-height:1.7}
+  .note b{color:var(--ink)}
+</style></head><body>
+<div class="box">
+  <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"><path d="M12 3v18M7 8h10M4 21h16M6 21v-9l6-4 6 4v9"/></svg></div>
+  <h1>__CHURCH__ 교회행정</h1>
+__PANEL__
+</div>
+<script>
+function doLogin(ev){
+  if(ev&&ev.preventDefault)ev.preventDefault();
+  var i=document.getElementById('pw');if(!i)return false;
+  var m=document.getElementById('msg'),b=document.getElementById('go');
+  var v=i.value||'';
+  if(!v){m.textContent='비밀번호를 넣어 주세요.';return false;}
+  b.disabled=true;b.textContent='확인하는 중...';m.textContent='';
+  // ★'이 폰 기억하기' — 체크하면 약 30일, 끄면 브라우저를 닫을 때까지만.
+  //   단추가 없는 옛 화면이면 켠 것으로 본다(종전 동작 유지).
+  var _r=document.getElementById('rmb'); var _rem=_r?!!_r.checked:true;
+  fetch('/login',{method:'POST',headers:{'Content-Type':'application/json','X-Church-App':'1'},body:JSON.stringify({pw:v,remember:_rem})})
+   .then(function(r){return r.json();})
+   .then(function(d){
+     if(d&&d.ok){location.href='/';return;}
+     b.disabled=false;b.textContent='들어가기';i.value='';
+     m.textContent=(d&&d.error)?d.error:'비밀번호가 맞지 않습니다.';
+   })
+   .catch(function(){
+     b.disabled=false;b.textContent='들어가기';
+     m.textContent='연결하지 못했습니다. 사무실 컴퓨터에서 프로그램이 켜져 있는지 확인해 주세요.';
+   });
+  return false;
+}
+(function(){var i=document.getElementById('pw');if(i)i.focus();})();
+</script>
+</body></html>"""
+
+LOGIN_PANEL = """  <p class="sub">폰에서 처음 들어오셨습니다.<br>정해 두신 비밀번호를 한 번만 넣어 주세요.</p>
+  <form onsubmit="return doLogin(event)">
+    <label for="pw">비밀번호</label>
+    <input id="pw" type="password" autocomplete="current-password" inputmode="text" placeholder="비밀번호">
+    <label style="display:flex;align-items:center;gap:8px;margin:10px 2px 4px;font-size:15px;font-weight:400">
+      <input id="rmb" type="checkbox" checked style="width:20px;height:20px;flex:none">
+      이 폰 기억하기 (약 __DAYS__일 동안 다시 안 묻습니다)</label>
+    <div class="note" style="margin:0 2px 10px">끄시면 <b>브라우저를 닫을 때까지만</b> 열립니다 —
+      다른 분 폰이나 빌린 기기로 잠깐 보실 때 꺼 주세요.</div>
+    <button id="go" type="submit">들어가기</button>
+  </form>
+  <div class="msg" id="msg">__ERROR__</div>
+  <div class="note"><b>한 번만 넣으시면 됩니다.</b> 그 뒤로는 이 폰에서 바로 열립니다(약 __DAYS__일).
+  사무실 컴퓨터에서는 지금까지처럼 비밀번호를 묻지 않습니다.</div>
+  <!-- ★이 비밀번호가 ★무엇을 막고 ★무엇을 못 막는지 그대로 적는다(오너 티켓 §1-6).
+       지금 연결은 https 가 아니다 — '안전합니다'라고 쓰지 않는다. -->
+  <div class="note"><b>이 비밀번호가 막아 주는 것</b><br>
+  같은 와이파이에 있는 다른 사람이 <b>우연히 열어 보는 것</b>을 막아 줍니다.<br><br>
+  <b>막지 못하는 것</b><br>
+  지금 연결은 암호화(https)가 아닙니다. 같은 와이파이에서 <b>작정하고 엿보면 비밀번호가 보일 수 있습니다.</b><br>
+  ★<b>카페·공항 같은 공용 와이파이에서는 쓰지 마세요.</b></div>"""
+
+NOPW_PANEL = """  <p class="sub">아직 폰 접속 비밀번호를 정하지 않으셨습니다.</p>
+  <div class="note"><b>사무실 컴퓨터에서 먼저 정해 주세요.</b><br>
+  프로그램 화면 &gt; 시스템 &gt; <b>폰 접속 설정</b> 카드에서 비밀번호를 정하시면,
+  그때부터 이 폰에서 들어오실 수 있습니다.<br><br>
+  비밀번호를 정하기 전에는 폰 접속이 열리지 않습니다 — 교인 명부를 지키기 위한 안전장치입니다.</div>"""
 
 def _python_exe():
     # 서버가 pythonw로 떠도, 명령 실행은 stdout 있는 python.exe로
@@ -1141,18 +1952,329 @@ def _friendly_error(cmd, detail):
     return "\n".join(L)
 
 
-def run_cmd(cmd, args):
+# ── 📄 폰으로 문서 받기 — 등록부(메모리) ────────────────────────────────
+#   ★경로를 주소에 싣지 않는다. 화면(브라우저)이 "이 파일 주세요"라고 ★경로를 말하게 두면,
+#     무엇을 받을지 화면이 정하게 된다. 그래서 ★서버가 먼저 검사한 것만 ★번호표(토큰)로 바꿔 주고,
+#     화면은 그 번호표만 안다 — 경로를 모르고, 보낼 수도 없다.
+#   ★번호표는 ★메모리에만 둔다(설정 파일에 적으면 그 파일을 본 사람이 문서를 받는다).
+_DL={}                    # {번호표: [실경로, 만료시각, 세션키, 파일명]}
+_DL_LOCK=threading.Lock()
+DL_TTL=1800               # 30분 — 심방 중 눌러 받기엔 넉넉하고, 오래 남지도 않는다
+DL_MAX=200                # 상한 — 무한 증식 방지
+DL_MIME={"docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+         "xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+         "pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+         "pdf":"application/pdf","hwp":"application/x-hwp","hwpx":"application/hwp+zip",
+         "txt":"text/plain; charset=utf-8","png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg"}
+
+# ★내보낼 수 있는 확장자 — ★이 목록에 없으면 어떤 뿌리에 있든 못 나간다.
+#   뿌리 목록은 설정에 따라 넓어질 수 있지만 ★이 층은 남는다(자료·소스·백업 파일은 문서가 아니다).
+DL_EXT={"docx","xlsx","pptx","pdf","hwp","hwpx","txt","png","jpg","jpeg"}
+# ★문서 분류 9종 — church.py 의 CAT() 과 ★같은 이름이어야 한다. 한쪽만 고치지 마라.
+#   프로그램 루트 : "01 교회 기본·조직"  (점 없음)
+#   아카이브루트  : "01. 교회 기본·조직" (★점 있음 — CAT() 이 n+". "+이름 으로 만든다)
+DL_CATS=(("01","교회 기본·조직"),("02","예배·성례·예식"),("03","교육·훈련"),("04","목양·셀·심방·새가족"),
+         ("05","선교"),("06","재정·증명"),("07","행사·홍보·자료"),("08","대외·인사·시설"),("09","설교"))
+
+# ★한글 → 로마자 (ASCII 파일명 폴백)
+#   ★왜 필요한가 — 2026-08-17 실측(_실험/cd_rule_probe.py · 폰 폭 390 · playwright webkit):
+#     webkit(사파리 계열)은 `filename*=UTF-8''…` 를 ★읽지 않는다.
+#       · filename* 만 보내면 ★주소 끝 글자로 이름을 짓는다(시험에서 'B.docx' 가 나왔다)
+#       · ASCII `filename=` 이 있으면 ★언제나 그것을 쓴다(둘의 ★순서를 바꿔도 결과가 같다)
+#     ⇒ 아이폰에서 실제로 저장되는 이름은 ★ASCII 폴백이다. 그러니 폴백이 뜻을 지녀야 한다.
+#   종전 폴백은 `re.sub(r'[^A-Za-z0-9._-]','_',fn).strip('_')` 였다. 한글이 전부 '_' 가 되고
+#   앞쪽 '_' 가 잘려 나가 `[발급] 교인 증명원_박대가족_2026-08-17.docx` 가 ★`2026-08-17.docx` 로
+#   뭉개졌다 — 폰에 받아 놓고도 ★그게 무슨 문서인지 알 수 없다(브리프 D6 이 막으려던 바로 그 일).
+#   ⇒ 음절을 자모로 풀어 로마자로 적는다. 표 3개면 ★모든 한글 파일명에 통한다(카드마다 손볼 필요 없다).
+#   chromium 은 종전대로 filename* 의 ★한글 이름을 그대로 쓴다 — 기능 후퇴 0.
+_RR_CHO=("g","kk","n","d","tt","r","m","b","pp","s","ss","","j","jj","ch","k","t","p","h")
+_RR_JUNG=("a","ae","ya","yae","eo","e","yeo","ye","o","wa","wae","oe","yo","u","wo","we","wi",
+          "yu","eu","ui","i")
+_RR_JONG=("","k","k","ks","n","nj","nh","t","l","lk","lm","lb","ls","lt","lp","lh","m","b","bs",
+          "s","ss","ng","j","ch","k","t","p","h")
+
+def _romanize(s):
+    """한글 음절을 로마자로. 한글이 아닌 글자는 그대로 둔다."""
+    out=[]
+    for ch in s:
+        o=ord(ch)
+        if 0xAC00<=o<=0xD7A3:
+            i=o-0xAC00
+            out.append(_RR_CHO[i//588]+_RR_JUNG[(i%588)//28]+_RR_JONG[i%28])
+        else:
+            out.append(ch)
+    return "".join(out)
+
+def _ascii_name(fn):
+    """filename* 를 못 읽는 폰에서도 ★무엇인지 알아볼 수 있는 ASCII 이름을 만든다."""
+    base,dot,ext = fn.rpartition(".")
+    if not dot: base,ext = fn,""
+    r=re.sub(r"[^A-Za-z0-9._-]+","_",_romanize(base))
+    r=re.sub(r"_{2,}","_",r).strip("_.")
+    if not r: r="document"
+    e=re.sub(r"[^A-Za-z0-9]+","",ext).lower()
+    return r[:120]+(("."+e) if e else "")
+
+def _songdir_rc():
+    """악보 폴더(`church.py` L1229 `SONGDIR`)의 ★normcase(realpath). 없으면 ★빈 문자열.
+
+       ★왜 함수로 두는가: 이 값을 ★두 곳(`_dl_roots` 의 뿌리 · `_dl_check` ②겹의 예외)에서 쓴다.
+         한쪽만 고치면 ★한쪽은 열리고 한쪽은 막혀 원인 모를 '되다 안 되다'가 된다 — 진실은 한 곳에 둔다.
+       ★폴더가 없으면 빈 문자열을 돌려준다 ⇒ 예외가 ★아예 성립하지 않는다(닫히는 쪽으로 실패한다).
+       ★`church.py` 의 `SONGDIR` 을 옮기면 ★여기도 같이 옮겨라."""
+    try:
+        d=os.path.join(BASE,"_내자료","찬양곡")
+        if os.path.isdir(d): return os.path.normcase(os.path.realpath(d))
+    except Exception: pass
+    return ""
+
+def _dl_roots():
+    """문서를 폰으로 내보내도 되는 ★뿌리 목록. ★realpath 로 풀어서 돌려준다.
+
+       ★normpath 가 아니라 realpath 인 이유: normpath 는 '..' 만 접고 ★바로가기(심볼릭링크·정션)를
+         못 푼다. 뿌리 안에 바깥을 가리키는 바로가기가 있으면 그대로 통과해 버린다.
+       ★뿌리 쪽도 함께 풀어야 한다 — 파일만 풀고 뿌리를 안 풀면 ★비교가 어긋난다.
+       ★목록은 church.py 의 CAT() 이 만드는 폴더와 같아야 한다 — 한쪽만 고치지 마라."""
+    out=[]
+    def _add(d):
+        try:
+            if d and os.path.isdir(d): out.append(os.path.normcase(os.path.realpath(d)))
+        except Exception: pass
+    root=os.path.dirname(BASE)                     # 프로그램 루트(_시스템의 위)
+    for n,nm in DL_CATS:
+        _add(os.path.join(root, n+" "+nm))         # 프로그램 루트 쪽 — 번호 뒤에 ★점이 없다
+    # ★자료 보관 폴더(아카이브루트)를 쓰시면 문서는 ★그 밑 '0X. 이름' 폴더에 저장된다
+    #   (church.py 의 CAT(): n+". "+이름 — ★번호 뒤에 점이 붙는다. 프로그램 루트 쪽과 이름 규칙이 다르다).
+    #   ★그 9개 폴더만 뿌리로 넣는다 — 보관 폴더 ★자체를 넣으면 그것이 프로그램 폴더의 상위일 때
+    #   교인 명부·설정·백업·스냅샷까지 통째로 삼킨다. 9개만 넣으면 프로그램 폴더는 그 ★형제라 안 들어온다.
+    try:
+        ar=(_cfg_live() or {}).get("아카이브루트")
+        if ar and os.path.isdir(ar):
+            for n,nm in DL_CATS:
+                _add(os.path.join(ar, n+". "+nm))  # 아카이브 쪽 — 번호 뒤에 ★점이 있다
+    except Exception: pass
+    # ★A23(부채 4-10) — 성경자료 폴더 ★하나만 덧붙인다 (master 재정 A22 ② · 티켓 A23 1단계)
+    #   ★왜 필요한가: 성경 통독표·암송표·퀴즈는 여기에 저장되는데 위 9종 밖이라
+    #     ★번호표가 아예 안 나왔다 — 목사님이 폰에서 그 문서를 못 받으셨다.
+    #   ★왜 안전한가: 이 폴더는 프로그램 폴더(_시스템)의 ★형제이지 상위가 아니다.
+    #     그러니 교인 명부·설정·백업·스냅샷은 ★이 뿌리 안에 들어오지 않는다(위 9종과 같은 성질).
+    #   ★★리터럴 경로를 박지 않는다 — `church.py` 의 `BIBLECAT()` 와 ★같은 규칙으로 런타임에 푼다.
+    #     (아카이브루트가 있으면 그 밑, 없으면 프로그램 루트 밑 — 정본은 앞쪽, 시험대는 뒤쪽으로 갈린다.
+    #      리터럴을 박으면 ★한쪽 환경에서 조용히 안 듣는다.)
+    #   ★church.py 의 `BIBLECAT()` 을 고치면 ★여기도 같이 고쳐라(위 CAT() 주석과 같은 이유).
+    try:
+        ar=(_cfg_live() or {}).get("아카이브루트")
+        _add(os.path.join(ar, "성경자료") if (ar and os.path.isdir(ar))
+             else os.path.join(root, "성경자료"))
+    except Exception: pass
+    # ★A23-1 재정 §3-① — 엑셀 관리대장 폴더(`church.py` L1173 = `ROOT\_관리대장(Excel)`).
+    #   ★`_시스템` 의 ★형제라 아래 ②겹(프로그램 폴더 하위 거부)에 ★걸리지 않는다 — 뿌리 한 줄이면 된다.
+    _add(os.path.join(root, "_관리대장(Excel)"))
+    # ★A23-1 재정 §2 — 악보 폴더. ★이것만은 `_시스템` ★안이라 뿌리에 넣는 것만으로는 부족하고
+    #   `_dl_check` ②겹의 ★예외도 함께 있어야 한다(두 곳 다 좁게 — 재정 조건 2).
+    _add(_songdir_rc())
+    return out
+
+def _dl_check(path):
+    """이 경로를 내보내도 되는가. 되면 ★푼 실경로, 아니면 빈 문자열.
+       ★번호표를 줄 때와 ★실제로 보낼 때 ★두 번 검사한다(그 사이에 파일이 바뀔 수 있다).
+
+       ★검사는 4겹이다(하나가 뚫려도 나머지가 남게):
+         ①확장자 화이트리스트 ②프로그램 폴더(_시스템) 하위는 ★무조건 거부
+         ③허용 뿌리 안인지(realpath) ④보낼 때 다시 한 번."""
+    try:
+        rp=os.path.realpath(path)
+        if not os.path.isfile(rp): return ""
+        # ① 문서가 아닌 것은 어떤 뿌리에 있어도 못 나간다(.json .py .bak .db …)
+        base_name=os.path.basename(rp)
+        ext=base_name.rsplit(".",1)[-1].lower() if "." in base_name else ""
+        if ext not in DL_EXT: return ""
+        rc=os.path.normcase(rp)
+        # ② ★프로그램 폴더 하위는 뿌리가 뭐라 하든 거부 —
+        #    교인 명부(church_db.json)·설정(폰 비밀번호 해시)·소스·_백업·_피닉스(스냅샷 60개)가 다 여기 있다.
+        basep=os.path.normcase(os.path.realpath(BASE))
+        if rc==basep or rc.startswith(basep+os.sep):
+            # ★★A23-1 재정 §2 — ★단 하나의 예외: 악보 폴더(`SONGDIR`).
+            #
+            # ★왜 예외가 필요한가: 악보는 `_시스템\_내자료\찬양곡` 에 저장된다. 이 ②겹이
+            #   ★뿌리와 무관하게 막아 왔기 때문에 목사님이 심방지에서 악보를 못 보셨다.
+            #
+            # ★★왜 이 예외가 안전한가 (다음 사람에게 — ★이걸 근거로 예외를 ★넓히지 마라):
+            #   ②를 열어도 ①(확장자 화이트리스트)과 ③(허용 뿌리)은 ★그대로 남는다.
+            #   · 교인 명부 `church_db.json` · 설정 `church_config.json`(폰 비밀번호 해시·솔트)은
+            #     ★`.json` 이라 ①이 막는다 — ②가 없어도 못 나간다.
+            #   · 소스 `.py` · `.db` · `.bak` 도 ①에서 죽는다.
+            #   ⇒ 이 예외의 실제 노출면은 **`_내자료\찬양곡` 안의 문서형 파일뿐**이고,
+            #     그 폴더는 설계상 ★악보만 담는다(`church.py` `song_add` 가 거기에만 복사한다).
+            #
+            # ★★범위를 좁게 유지하는 두 장치 — ★고치지 마라:
+            #   ⓐ `_songdir_rc()` 는 ★그 폴더 하나만 푼다. glob·패턴·목록이 ★아니다.
+            #   ⓑ 비교에 ★`+os.sep` 를 붙인다. 이게 없으면 `찬양곡백업`·`찬양곡_old` 처럼
+            #      ★접두사만 같은 형제 폴더가 통째로 뚫린다(startswith 함정).
+            #      ★변이 검산으로 확인했다(2026-08-21): 구분자 가드를 빼면 `찬양곡백업` 이 ★실제로 뚫린다.
+            #   ★`_백업\<시각>\_내자료\찬양곡\...` 은 경로가 달라(앞이 `_백업`) 여기 안 걸린다 — 계속 거부된다.
+            _sd=_songdir_rc()
+            if not (_sd and (rc==_sd or rc.startswith(_sd+os.sep))): return ""
+        # ③ 허용 뿌리 안인가
+        for r in _dl_roots():
+            if rc==r or rc.startswith(r+os.sep): return rp
+    except Exception: pass
+    return ""
+
+def _dl_reg(path, sess_key):
+    """검사를 통과한 파일에만 번호표를 준다. 통과 못 하면 ★번호표 자체가 안 나온다."""
+    rp=_dl_check(path)
+    if not rp or not sess_key: return ""
+    tid=secrets.token_urlsafe(18)
+    now=time.time()
+    with _DL_LOCK:
+        for k,v in [(k,v) for k,v in _DL.items() if v[1]<=now]: _DL.pop(k,None)   # 만료분 청소
+        if len(_DL)>=DL_MAX:
+            for k,_ in sorted(_DL.items(), key=lambda kv: kv[1][1])[:max(1,len(_DL)-DL_MAX+1)]:
+                _DL.pop(k,None)
+        _DL[tid]=[rp, now+DL_TTL, sess_key, os.path.basename(rp)]
+    return tid
+
+def _dl_get(tid, sess_key):
+    """번호표를 실경로로 바꾼다. ★남의 세션·만료·뿌리 밖은 전부 거절."""
+    with _DL_LOCK: v=_DL.get(tid)
+    if not v: return None, "이 문서는 더 이상 받을 수 없습니다. 카드를 다시 실행해 주세요."
+    if v[1]<=time.time():
+        with _DL_LOCK: _DL.pop(tid,None)
+        return None, "받는 시간이 지났습니다(30분). 카드를 다시 실행해 주세요."
+    if v[2]!=sess_key: return None, "이 문서를 받을 수 있는 기기가 아닙니다."
+    if not _dl_check(v[0]): return None, "문서를 찾지 못했습니다. 카드를 다시 실행해 주세요."
+    # ★번호표는 ★한 번만 쓴다 — 여기서 폐기한다(2026-08-20 · reviewer-codex 지적 · master 재정 A8).
+    #   전에는 만료(위 30분)일 때만 지웠다. 그래서 같은 번호표로 30분 동안 몇 번이고 다시 받을 수 있었다.
+    #   세션에 묶여 있어(위 v[2] 검사) 남이 주소만으로 받지는 못하지만, 폰을 잠깐 건네거나 브라우저를
+    #   열어 둔 채 자리를 비우면 그 안에서 다시 받힌다. ★겹은 하나라도 더 있는 편이 낫다.
+    #   ★다시 누르시면 어떻게 되나: 위 1924행이 "이 문서는 더 이상 받을 수 없습니다.
+    #     카드를 다시 실행해 주세요." 라고 ★다음 행동까지 알려 드린다(막다른 길이 아니다).
+    with _DL_LOCK: _DL.pop(tid,None)
+    return v, ""
+
+
+# ★폰에서 막는 명령. 지금은 ★비어 있다 — 2026-08-19 오너 결정으로 open-file·print-file 을
+#   '막기'에서 '★문서를 내려받기'로 바꿨다(church.py 의 open_file·print_file 이 _openfile 을 탄다).
+#   ★막는 것은 마지막 수단이다. 폰에서 뜻이 있는 일이면 되게 만들고, 정말 폰에서 할 수 없는 일
+#   (폴더 열기·프로그램 종료)만 막는다 — 그 둘은 각자 제자리에서 막고 있다.
+REMOTE_DENY=set()
+
+def _srv_findpath(line):
+    """줄에서 파일 경로를 찾는다 — ★화면 쪽 findPath() 와 ★같은 규칙이어야 한다.
+       한쪽만 잡으면 폰에서 ★어떤 카드는 링크가 안 뜬다(그 카드만 반쪽이 된다).
+       규칙: 아는 확장자 중 ★가장 뒤에 있는 것을 끝으로 잡고, 거기서 앞으로 훑어
+             'X:' 처럼 ★드라이브 글자+콜론 이 나오는 자리를 시작으로 잡는다.
+       ★church_web.py 화면 쪽 findPath 와 한 쌍이다 — 한쪽만 고치지 마라."""
+    low=line.lower(); end=-1; el=0
+    for e in ('.docx','.hwp','.hwpx','.xlsx','.pptx','.pdf','.txt'):
+        q=low.rfind(e)
+        # ★같은 자리에서 시작하면 ★긴 확장자가 이긴다 — .hwp 와 .hwpx 는 시작 위치가 같아서,
+        #   먼저 검사된 .hwp 가 자리를 잡으면 .hwpx 의 x 가 잘려 나간다.
+        #   잘린 경로는 존재하지 않으므로 ★그 문서만 조용히 안 받아진다(안전하게 실패하지만 반쪽이 된다).
+        if q>=0 and (q>end or (q==end and len(e)>el)): end=q; el=len(e)
+    if end<0: return ""
+    end+=el; start=-1
+    for j in range(end-1,0,-1):
+        c=line[j]; pv=line[j-1]
+        if c==':' and (('A'<=pv<='Z') or ('a'<=pv<='z')): start=j-1; break
+    if start<0: return ""
+    return line[start:end]
+
+def _phone_line(ln):
+    """폰 화면에 ★사무실 컴퓨터의 폴더 경로를 적지 않는다 — ★파일 이름만 남긴다.
+
+       ★왜(2026-08-17 실측): 받기 단추 아래에
+         `✅ 교인 증명원 발급(제 ○-2026-016 호): D:[역슬래시]○○교회[역슬래시]…[역슬래시]06 재정·증명[역슬래시][발급] 교인 증명원_….docx`
+       가 그대로 떴다. 폰에서 이 경로는 ★뜻이 없다 — 목사님은 그 폴더를 열 수 없고,
+       바로 위 받기 단추가 파일 이름을 ★이미 적어 준다. 남는 것은 읽기 어려운 긴 문자열과
+       내부 폴더 구조뿐이다.
+       ★단, 이 함수는 ★받기 단추가 생긴 줄에만 쓴다. 못 받는 문서는 경로를 ★그대로 두어야
+         화면이 '사무실 컴퓨터에 저장되었습니다' 안내를 낼 수 있다(그 안내는 경로를 보고 만든다).
+       ★PC 출력은 이 함수를 거치지 않는다 — 기능 후퇴 0."""
+    out=ln
+    for _ in range(4):                       # 한 줄에 경로가 여러 개일 수 있다
+        p=_srv_findpath(out)
+        if not p: break
+        b=os.path.basename(p)
+        if not b or b==p: break              # 이름만 있는 줄이면 더 줄일 것이 없다(무한반복 방지)
+        out=out.replace(p, b)
+    return out
+
+def run_cmd(cmd, args, remote=False, sess=""):
     argv=[PYEXE, CHURCH_PY, cmd]
     for k,v in args.items(): argv+= ["--"+k, str(v)]
     env=dict(os.environ); env["PYTHONIOENCODING"]="utf-8"; env["CHURCH_WEB"]="1"
+    # ★폰에서 부르신 것인지 자식(church.py)도 알아야 한다 — 폴더 열기처럼 ★내려받을 수 없는 동작은
+    #   폰이면 아예 하지 않고 사실대로 알려야 하기 때문이다.
+    if remote: env["CHURCH_REMOTE"]="1"
     tmo=600 if cmd in ("video-plan","video-render","nlm-add") else 120   # 영상·NLM 업로드는 시간이 더 걸림(큰 PDF 업로드·처리)상 대비)
     try:
         r=subprocess.run(argv,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=tmo,env=env,cwd=BASE)
         shown=[]; opened=0
+        _dl_done=set()          # 같은 문서에 링크를 두 번 달지 않는다(마커와 본문 줄에 같은 경로가 온다)
+        def _mk_get(path):
+            """검사를 통과한 문서면 ▶받기 줄을 만든다. 이미 만든 문서면 None(중복 링크 방지)."""
+            if not (remote and sess and path): return None
+            rp=_dl_check(path)
+            if not rp or rp in _dl_done: return None
+            tid=_dl_reg(rp, sess)
+            if not tid: return None
+            _dl_done.add(rp)
+            return "▶받기|%s|%s"%(tid, os.path.basename(rp))
         for ln in (r.stdout or "").split("\n"):     # 생성 파일은 부모(웹서버)가 확실히 연다
             if ln.startswith("__OPENFILE__"):
-                try: os.startfile(ln[len("__OPENFILE__"):].strip()); opened+=1
-                except Exception: pass
+                _fp=ln[len("__OPENFILE__"):].strip()
+                # ★폰에서 부르신 것이면 사무실 컴퓨터에서 파일을 ★열지 않는다 —
+                #   심방지에서 카드를 누르셨는데 ★아무도 없는 사무실 화면에서 문서가 혼자 열린다.
+                #   대신 ★그 자리에서 받으실 수 있게 번호표를 드린다.
+                if remote:
+                    g=_mk_get(_fp)
+                    if g: shown.append(g)
+                    elif not _dl_check(_fp):
+                        # 받을 수 없는 파일일 때만 사실대로 알린다 —
+                        # ★받기 링크를 옆에 두고 "사무실에 저장되었습니다"라고 하면 ★화면이 스스로 모순된 말을 한다.
+                        shown.append("  ※ 만든 문서는 사무실 컴퓨터에 저장되었습니다.")
+                else:
+                    try: os.startfile(_fp); opened+=1
+                    except Exception: pass
+            elif remote and sess:
+                # ★폰에서 부르신 것이면, ★서버가 여기서 경로를 찾아 검사하고 번호표로 바꾼다.
+                #   ★화면(브라우저)에게 경로를 되돌려 달라고 하지 않는다 — 무엇을 받을지 화면이 정하면 안 된다.
+                #   PC 출력은 이 분기에 들어오지 않으므로 ★지금 그대로다(기능 후퇴 0).
+                mo=re.match(r'^▶열기\|(.+?)\|(.+)$', ln)
+                if mo:
+                    _t1=mo.group(1)
+                    # ★A23-1 재정 §3-② — ★웹 주소는 «문서가 아니다». 문장만 바로잡는다(기능 무접촉).
+                    #   ★무엇이 틀렸었나: `ask-ai` 는 ChatGPT·제미나이·클로드·뤼튼 ★링크 4줄을 내는데,
+                    #     아래 문장이 그것을 *"사무실 컴퓨터에 저장되었습니다"* 라고 안내했다.
+                    #     저장된 문서가 없는데 저장됐다고 말하니 ★목사님이 사무실에 가서 찾으신다.
+                    #   ★고친 방식: 저장 여부를 말하지 않고 ★사실(인터넷 주소다)과 ★다음 행동(주소를 연다)을 준다.
+                    if _t1.lower().startswith(("http://","https://")):
+                        shown.append("  ※ %s — 인터넷 주소입니다(사무실 컴퓨터에 저장된 문서가 아닙니다)."%mo.group(2))
+                        shown.append("     폰 브라우저 주소창에 넣어 여세요: %s"%_t1)
+                        continue
+                    g=_mk_get(_t1)
+                    if g: shown.append(g)
+                    elif not _dl_check(_t1):
+                        # 번호표가 안 나오는 파일(문서 폴더 밖·문서 아닌 확장자)이면 ★죽은 단추를 만들지 않는다
+                        shown.append("  ※ %s — 사무실 컴퓨터에 저장되었습니다."%mo.group(2))
+                    continue
+                # ★경로를 지우기 ★전에 번호표를 만든다(지운 뒤엔 찾을 경로가 없다).
+                _p=_srv_findpath(ln)
+                g=_mk_get(_p)
+                if g:
+                    shown.append(_phone_line(ln))   # 받기 단추가 이름을 적어 주니 경로는 지운다
+                    shown.append(g)
+                elif _p and _dl_check(_p):
+                    # ★받을 수 있는 문서인데 링크가 안 나온 경우 = 위에서 ★이미 단추를 만들었다
+                    #   (__OPENFILE__ 마커와 본문 줄에 같은 경로가 온다 — _dl_done 이 중복을 막는다).
+                    #   단추는 이미 있으니 여기서도 경로는 지운다. ★이 가지가 없으면
+                    #   문서 카드의 ★가장 흔한 경우에서 경로가 그대로 남는다(2026-08-17 적발).
+                    shown.append(_phone_line(ln))
+                else:
+                    shown.append(ln)                # ★못 받는 문서는 종전 그대로 —
+                                                    #   화면이 이 경로를 보고 '사무실에 저장' 안내를 낸다
             else: shown.append(ln)
         _beep(r.returncode==0)
         if cmd=="setup" and r.returncode==0:
@@ -1174,12 +2296,142 @@ def run_cmd(cmd, args):
 
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
-    def _send(self,body,ct="text/html; charset=utf-8"):
-        b=body.encode('utf-8'); self.send_response(200)
+    def _send(self,body,ct="text/html; charset=utf-8",status=200,extra=None):
+        b=body.encode('utf-8'); self.send_response(status)
         self.send_header("Content-Type",ct); self.send_header("Content-Length",str(len(b)))
         self.send_header("Cache-Control","no-store, must-revalidate")
+        for k,v in (extra or []): self.send_header(k,v)
         self.end_headers(); self.wfile.write(b)
+    # ── 📱 폰 접속 자물쇠 ──────────────────────────────────────────────
+    def _login_page(self,err=""):
+        """로그인 화면은 대시보드와 따로 만든다 — 아직 못 들어온 사람에게 카드 목록까지 보여줄 이유가 없다."""
+        if _pw_rec():
+            panel=LOGIN_PANEL.replace("__ERROR__",err).replace("__DAYS__",str(_sess_days()))
+        else:
+            panel=NOPW_PANEL
+            if err: panel+=f'\n  <div class="msg">{err}</div>'   # 사유를 삼키지 않는다
+        self._send(LOGIN_PAGE.replace("__CHURCH__",C.get("교회명","교회")).replace("__PANEL__",panel))
+    def _kind(self):
+        """이 요청의 세션 종류 — 'local'(이 컴퓨터) · 'remote'(폰) · None(아직 못 들어옴)."""
+        v=_sess_get(_cookie_token(self.headers.get("Cookie")))
+        return v[2] if v else None
+    def _deny(self,msg,status=401):
+        self._send(json.dumps({"ok":False,"error":msg},ensure_ascii=False),
+                   "application/json; charset=utf-8",status)
+    def _guard(self):
+        """이 요청을 통과시켜도 되는가. 통과면 True.
+           ★접속 주소로 통과를 결정하지 않는다 — 중계가 한 겹만 얹혀도 전원이 통과가 되기 때문이다.
+             통과의 근거는 오직 ①유효한 세션 쿠키 ②기동 때 발급한 로컬 열쇠, 둘뿐이다."""
+        # Host 검사는 아직 못 들어온 요청에도 먼저 한다 — 재바인딩은 로그인 화면부터 노린다.
+        if (self.headers.get("Host") or "").strip().lower() not in _allowed_hosts():
+            self._send("이 주소로는 열 수 없습니다.\n화면의 「📱 폰 접속 설정」 카드에 적힌 주소로 들어와 주세요.",
+                       "text/plain; charset=utf-8",400); return False
+        if _CFG_BROKEN[0]:      # 설정을 못 읽는 동안에는 아무도 통과시키지 않는다(조용한 실패 금지)
+            if self.command=="GET" and self.path.split("?")[0]=="/": self._login_page(_CFG_BROKEN[0])
+            else: self._deny(_CFG_BROKEN[0],503)
+            return False
+        path=self.path.split("?")[0]
+        if path in ("/login","/logout","/enter"): return True   # 자물쇠 자체를 여는 문
+        if self._kind(): return True
+        # 화면을 여는 것(/)이면 로그인 화면을 보여 주고, 자료를 가져가는 요청이면 401 로 답한다.
+        # (자료 요청에 로그인 화면을 200 으로 돌려주면 화면 쪽이 그걸 자료로 알고 조용히 깨진다.)
+        if self.command=="GET" and path=="/": self._login_page()
+        else: self._deny("로그인이 필요합니다.")
+        return False
+    def _do_enter(self):
+        """사무실 컴퓨터 자동 로그인 — 기동할 때 만든 열쇠를 가진 요청에만 세션을 심는다.
+           열쇠는 이 프로그램이 브라우저를 열 때 주소에 담아 넘긴 값이라, 중계는 흉내낼 수 없다."""
+        from urllib.parse import parse_qs, urlparse
+        # ★이 문은 ★사무실 컴퓨터 소켓(127.0.0.1)에서만 열린다.
+        #   폰 쪽 소켓도 같은 처리기를 쓰기 때문에, 이 한 줄이 없으면 사설망에 닿는 누구든
+        #   ★비밀번호 없이 사무실 권한 로그인을 얻을 수 있다(열쇠만 알면).
+        #   '중계 헤더가 있으면 거절'은 중계를 거친 요청만 잡는다 — 직결 요청은 그 헤더가 없다.
+        #   그래서 그것만으로는 2겹이 아니라 한 겹이었다.
+        if self.server.server_address[0]!="127.0.0.1":
+            self._login_page(); return
+        # ★2겹 방어 — 중계를 거쳐 온 요청에는 이 문을 열지 않는다.
+        #   열쇠 자체가 이 컴퓨터에서만 얻어지지만, 중계가 붙은 구성이라면 그 전제가 흔들린다.
+        if _via_proxy(self):
+            self._login_page("중계(프록시)를 거친 접속에서는 자동 로그인을 하지 않습니다."); return
+        # ★사람이 주소창으로 들어온 것만 받는다(화면 이동 요청). 페이지 속 스크립트가 몰래 부르는
+        #   fetch·XHR·이미지 요청으로는 이 문을 열 수 없다 — 브라우저가 이 두 머리글을 대신 붙여 준다.
+        #   (없으면 옛 브라우저다. 그때는 아래 loopback 조건으로만 받는다.)
+        _m=(self.headers.get("Sec-Fetch-Mode") or "").lower()
+        _d=(self.headers.get("Sec-Fetch-Dest") or "").lower()
+        if (_m or _d) and not (_m=="navigate" and _d=="document"):
+            self._login_page("주소창으로 직접 열어 주세요."); return
+        if _CFG_BROKEN[0]:
+            self._login_page(_CFG_BROKEN[0]); return
+        global _LOCAL_KEY
+        k=(parse_qs(urlparse(self.path).query).get('k',[''])[0])
+        if not _LOCAL_KEY or not hmac.compare_digest(k,_LOCAL_KEY):
+            # ★두 번째로 열린 것일 수 있다 — 탭 복원·새로고침·방문기록으로 같은 주소가 다시 열린다.
+            #   ★오류 화면을 내지 않는다. 목사님이 ★당신 컴퓨터에서 오류를 보시면 안 된다.
+            #   정상 로그인 화면 + '다시 여는 법'만 알려 드린다.
+            self._login_page("이 주소는 ★한 번만 쓰입니다(안전을 위해 그렇게 만들었습니다). "
+                             "검은 창에서 [Enter] 를 한 번 누르시면 새로 열어 드립니다 — "
+                             "바탕화면 아이콘을 다시 누르셔도 됩니다."); return
+        # ★열쇠를 ★여기서 버린다(1회용) — 방문기록·탭 복원으로 같은 주소가 다시 열려도 문이 되지 않는다.
+        #   ★특히 브라우저 방문기록 동기화는 재기동 전에 그 주소를 클라우드로 올린다.
+        _LOCAL_KEY=""
+        t=_sess_new("local")
+        self.send_response(302); self.send_header("Location","/")
+        self.send_header("Set-Cookie",
+                         f"{COOKIE_NAME}={t}; HttpOnly; SameSite=Lax; Path=/; "
+                         f"Max-Age={_sess_days()*86400}{_cookie_attrs(self)}")
+        self.send_header("Cache-Control","no-store, must-revalidate"); self.end_headers()
+    def _do_login(self):
+        ip=self.client_address[0]
+        # ★잠그지 않는다. 여러 번 틀렸으면 ★늦게 답할 뿐이다(오너 티켓 §1-4).
+        #   여기서 미리 재우고 그 뒤에 정상 검사를 한다 — 그래서 맞는 비밀번호는 ★언제나 통과한다.
+        _wait=_delay_for(ip)
+        if _wait: time.sleep(_wait)
+        if not _pw_rec():
+            self._send(json.dumps({"ok":False,"error":"사무실 컴퓨터에서 먼저 비밀번호를 정해 주세요."},
+                                  ensure_ascii=False),"application/json; charset=utf-8",403); return
+        try:
+            n=int(self.headers.get('Content-Length',0) or 0)
+            d=json.loads((self.rfile.read(n) if n else b"{}").decode('utf-8') or "{}")
+            pw=str(d.get("pw",""))
+            # ★'이 폰 기억하기' — 없으면 켠 것으로 본다(옛 화면·자동화가 보낸 요청이 갑자기 짧아지지 않게)
+            remember=bool(d.get("remember",True))
+        except Exception:
+            pw=""; remember=True
+        if _pw_verify(pw):
+            _fail_clear(ip)
+            # ★기억하기 켬 = 30일(설정값) · 끔 = 브라우저를 닫으면 끝(쿠키에 만료를 안 적는다)
+            #   ★쿠키 만료에만 기대지 않는다 — 서버도 12시간으로 끊는다(브라우저가 언제 닫혔는지는 서버가 모른다).
+            t=_sess_new("remote", None if remember else NOREMEMBER_SEC)
+            ck=(f"{COOKIE_NAME}={t}; HttpOnly; SameSite=Lax; Path=/; "
+                +(f"Max-Age={_sess_days()*86400}" if remember else "")
+                +_cookie_attrs(self))
+            # ★Secure 는 _cookie_attrs 가 판단한다 — https 로 들어온 요청이면 붙이고, 아니면 뺀다.
+            #   기본 경로(사설망 주소 직접 접속)는 http 라서 붙이면 쿠키가 저장되지 않아 로그인 자체가 막힌다.
+            #   ★https 경로가 생기면 그때는 반드시 붙는다. 방식이 바뀌면 이 판단도 따라 바뀐다.
+            self._send(json.dumps({"ok":True},ensure_ascii=False),"application/json; charset=utf-8",
+                       200,[("Set-Cookie",ck)])
+        else:
+            time.sleep(FAIL_DELAY); _fail_mark(ip)
+            nxt=_delay_for(ip)
+            # ★지연 중임을 ★구별되는 문구로 알린다 — 안 그러면 "멈췄다"고 여기시고 앱을 지우신다.
+            #   ★'잠겼다'고 쓰지 않는다. 실제로 잠기지 않았고, 맞는 비밀번호면 그대로 들어가진다.
+            msg=(f"비밀번호가 맞지 않습니다. 여러 번 틀리셔서 다음 시도는 약 {nxt}초 뒤에 답합니다 — "
+                 f"잠긴 것이 아니라 늦게 답하는 것입니다. 맞는 비밀번호를 넣으시면 그대로 들어가집니다."
+                 if nxt else "비밀번호가 맞지 않습니다.")
+            self._send(json.dumps({"ok":False,"error":msg,"delay":nxt},ensure_ascii=False),
+                       "application/json; charset=utf-8",401)
+    def _do_logout(self):
+        _sess_drop(_cookie_token(self.headers.get("Cookie")))
+        self._send(json.dumps({"ok":True},ensure_ascii=False),"application/json; charset=utf-8",
+                   200,[("Set-Cookie",f"{COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")])
     def do_GET(self):
+        if not self._guard(): return
+        _p0=self.path.split("?")[0]
+        if _p0=="/enter": self._do_enter(); return
+        if _p0=="/login":
+            if self._kind():
+                self.send_response(302); self.send_header("Location","/"); self.end_headers(); return
+            self._login_page(); return
         if self.path=="/stats":     # 대시보드 실데이터(JSON) — church.py dashboard 결과
             js="{}"
             try:
@@ -1219,6 +2471,30 @@ class H(BaseHTTPRequestHandler):
                 for f in sorted(os.listdir(bgdir)):
                     if f.lower().endswith(('.jpg','.jpeg','.png','.webp','.gif')): files.append(f)
             self._send(json.dumps(files,ensure_ascii=False),"application/json; charset=utf-8"); return
+        if self.path.startswith("/download"):
+            # ★폰으로 문서 받기 — 주소에는 ★번호표만 들어온다(경로가 아니다).
+            #   여기서 다시 한 번 뿌리를 검사한다 — 번호표를 준 뒤에 파일이 바뀌었을 수 있다.
+            from urllib.parse import parse_qs, urlparse, quote
+            tid=(parse_qs(urlparse(self.path).query).get('id',[''])[0])
+            rec,err=_dl_get(tid, _tok_key(_cookie_token(self.headers.get("Cookie"))))
+            if not rec:
+                self._send(err or "받을 수 없습니다.","text/plain; charset=utf-8",404); return
+            rp=rec[0]; fn=os.path.basename(rp)
+            try: data=open(rp,'rb').read()
+            except Exception:
+                self._send("문서를 여는 중 문제가 생겼습니다. 카드를 다시 실행해 주세요.",
+                           "text/plain; charset=utf-8",500); return
+            ct=DL_MIME.get(fn.rsplit('.',1)[-1].lower() if '.' in fn else '', "application/octet-stream")
+            # ★한글 파일명 — 이름이 깨지면 목사님이 그 파일을 폰에서 못 찾으신다.
+            #   RFC5987(filename*)로 한글을 싣고, 못 읽는 옛 기기를 위해 ASCII 이름도 함께 적는다.
+            ascii_fb=_ascii_name(fn)     # ★webkit(아이폰)은 이 이름으로 저장한다 — 뜻이 남아야 한다
+            cd='attachment; filename="%s"; filename*=UTF-8\'\'%s' % (ascii_fb, quote(fn, safe=''))
+            self.send_response(200)
+            self.send_header("Content-Type",ct)
+            self.send_header("Content-Length",str(len(data)))
+            self.send_header("Content-Disposition",cd)
+            self.send_header("Cache-Control","no-store, must-revalidate")
+            self.end_headers(); self.wfile.write(data); return
         if self.path.startswith("/bg?"):  # 배경 사진 서빙(경로이탈 차단)
             from urllib.parse import parse_qs, urlparse
             fn=(parse_qs(urlparse(self.path).query).get('f',[''])[0])
@@ -1239,11 +2515,27 @@ class H(BaseHTTPRequestHandler):
             self._send(js,"application/json; charset=utf-8"); return
         page=(PAGE.replace("__CHURCH__",C.get("교회명","○○교회")).replace("__PASTOR__",C.get("담임","담임 목사"))
               .replace("__VERSION__",_engine_ver())
+              # ★화면이 자기가 폰인지 알아야 한다 — 사무실에서만 되는 일(파일 열기)을
+              #   폰에 단추로 띄우면 눌러도 아무 일이 없고, 그게 목사님께는 고장으로 보인다.
+              .replace("__REMOTE__","true" if self._kind()!="local" else "false")
               .replace("__ACTIONS__",json.dumps(ACTIONS,ensure_ascii=False))
               .replace("__HIDDEN__",json.dumps((cfg() or {}).get("숨긴카드",[]),ensure_ascii=False)))
         self._send(page)
     def do_POST(self):
+        # ★모든 POST 는 우리 화면에서 온 것인지 먼저 확인한다.
+        #   이게 없으면 목사님이 아무 웹사이트나 방문하는 것만으로 그 사이트가 몰래
+        #   이 프로그램에 명령을 보내 교인 자료를 건드릴 수 있다(사이트 간 요청 위조).
+        if not _csrf_ok(self):
+            self._deny("이 요청은 프로그램 화면에서 보낸 것이 아닙니다.",403); return
+        if self.path=="/login":  self._do_login();  return
+        if self.path=="/logout": self._do_logout(); return
+        if not self._guard(): return
+        kind=self._kind()
         if self.path=="/shutdown":
+            # ★폰에서는 끄지 못하게 한다 — 잘못 누르면 사무실 컴퓨터의 프로그램이 꺼져
+            #   그때부터 폰에서도 아무것도 안 된다(스스로 다시 켤 방법이 없다).
+            if kind!="local":
+                self._deny("프로그램 종료는 사무실 컴퓨터에서만 됩니다.",403); return
             self._send("종료되었습니다","text/plain; charset=utf-8")
             import threading as _t
             _t.Timer(0.4, lambda: os._exit(0)).start(); return
@@ -1276,13 +2568,35 @@ class H(BaseHTTPRequestHandler):
             except UnicodeDecodeError: text=raw.decode('cp949',errors='replace')
             data=json.loads(text or "{}")
             cmd=data.get("cmd","")
-            out=run_cmd(cmd, data.get("args",{}))
+            if kind!="local" and cmd in REMOTE_DENY:
+                self._deny("이 기능은 사무실 컴퓨터에서만 됩니다 — 폰에서 누르면 사무실 화면에서 열립니다.",403); return
+            out=run_cmd(cmd, data.get("args",{}), remote=(kind!="local"),
+                        sess=_tok_key(_cookie_token(self.headers.get("Cookie"))))
             if cmd=="update" and ("업데이트 완료" in out):
                 out+="\n\n🔄 잠시 후 화면이 자동으로 새 버전으로 바뀝니다. (안 바뀌면 F5 또는 시작.bat 다시 실행)"
                 import threading as _rt; _rt.Timer(1.6, _restart_self).start()
         except Exception as e:
             out="오류: "+str(e)
         self._send(out or "완료","text/plain; charset=utf-8")
+
+class _Server(ThreadingHTTPServer):
+    """폰이 연결을 끊는 것은 ★사고가 아니라 일상이다 — 그래서 사고로 적지 않는다.
+
+       폰은 화면이 잠기거나 와이파이↔데이터가 바뀌거나 다른 앱으로 넘어갈 때마다
+       받던 응답을 그냥 버리고 끊는다. 그때마다 파이썬 기본 서버는 트레이스백을
+       ★한 건에 15줄씩 화면에 쏟는다. 실제로 시험대에서 한 번 도는 동안 814KB,
+       1,600줄이 넘게 쌓였다(2026-08-18 실측). 문제가 셋이다 —
+         ① ★진짜 오류가 그 더미에 묻힌다(다음 사람이 원인을 못 찾는다),
+         ② 출력이 파이프를 채워 프로그램이 멈춰 보인다(시험 도구가 실제로 죽었다),
+         ③ 목사님이 검은 창에 쏟아지는 영문 트레이스백을 보시고 고장으로 아신다.
+
+       ★끊김만 삼키고 나머지는 그대로 올린다 — 조용해지자고 진짜 오류까지 덮으면
+         그건 고친 게 아니라 눈을 가린 것이다."""
+    def handle_error(self, request, client_address):
+        import sys as _s
+        if isinstance(_s.exc_info()[1], (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return                                  # 상대가 먼저 끊었다 — 알릴 것이 없다
+        super().handle_error(request, client_address)
 
 def _free_port(port):
     """포트를 점유한 옛 서버를 PID로 강제 종료 — 이미지 이름과 무관하게 새 코드가 항상 뜨게 한다."""
@@ -1314,8 +2628,39 @@ def _restart_self():
         try: subprocess.Popen([PYEXE, os.path.abspath(__file__)], cwd=BASE, env=env)
         except Exception: pass
     time.sleep(1.2); os._exit(0)   # 새 서버가 포트를 넘겨받도록 잠시 후 종료
+def _enter_url_new():
+    """★들어가는 주소를 ★새 열쇠로 만들어 돌려준다(쓸 때마다 새로).
+
+       왜 매번 새로 만드나 — 열쇠는 ★한 번 쓰면 버린다(_do_enter 가 소비한다).
+       그래서 '브라우저를 다시 열기'도 옛 주소를 재사용하면 안 되고 ★새 주소를 만들어야 한다.
+       (옛 주소가 다시 통하면 '1회용'이 아니게 되고, 방문기록에 남은 주소가 계속 문이 된다.)"""
+    global _LOCAL_KEY
+    _LOCAL_KEY=secrets.token_urlsafe(24)
+    return f"http://127.0.0.1:{PORT}/enter?k={_LOCAL_KEY}"
+
+def _reopen_loop(enter_url):
+    """이 창에서 [Enter] 를 누르시면 브라우저를 다시 열어 드린다.
+       ★들어가는 열쇠를 화면에 찍지 않고도 복구할 수 있는 길이다 —
+         열쇠는 이 프로그램의 기억에만 있고, 창에도 파일에도 남지 않는다.
+       ★enter_url 이 함수면 부를 때마다 ★새 열쇠로 새 주소를 만든다(1회용 열쇠 대응)."""
+    while True:
+        try:
+            if sys.stdin is None or not sys.stdin.readable(): return
+            line = sys.stdin.readline()
+            # ★EOF 면 여기서 끝낸다. readable() 은 "읽을 수 있는 종류인가"만 답하고 EOF 는 못 본다 —
+            #   창 없이 뒤에서 띄우면 readline() 이 예외 없이 즉시 빈 줄을 돌려주므로, 이 줄이 없으면
+            #   브라우저를 무한히 다시 여는 폭주가 난다(실측 373회·크롬 126개까지 증식).
+            if line == "": return
+        except Exception:
+            return
+        try:
+            _u=enter_url() if callable(enter_url) else enter_url
+            webbrowser.open(_u); print("  브라우저를 다시 열었습니다.")
+        except Exception: print("  브라우저를 열지 못했습니다. 바탕화면 아이콘을 다시 눌러 주세요.")
+
 def main():
     url=f"http://127.0.0.1:{PORT}/"
+    _sess_load()                   # 폰이 이미 로그인해 두었으면 그대로 이어간다(재시작 후 재로그인 방지)
     try:   # 사진 배경 폴더 자동 준비 — 목사님이 여기에 사진을 넣으면 테마 패널에 나타남
         _bgd=os.path.join(BASE,"_내자료","배경"); os.makedirs(_bgd,exist_ok=True)
         _gid=os.path.join(_bgd,"여기에 배경 사진을 넣으세요.txt")
@@ -1329,22 +2674,76 @@ def main():
                 "· 가로로 넓은 사진(1600px 이상)이 화면에 예쁘게 채워집니다.\n"
                 "· 글자가 잘 보이도록 사진 위에 은은한 막을 자동으로 씌워 드립니다.")
     except Exception: pass
-    _free_port(PORT)               # 옛 서버 강제 정리 → 항상 최신 코드로 기동
-    httpd=None
-    for _try in range(3):
-        try:
-            httpd=ThreadingHTTPServer(("127.0.0.1",PORT),H); break  # 멀티태스킹(동시 처리)
-        except OSError:
-            _free_port(PORT)
-            import time as _t; _t.sleep(1.0)
-    if httpd is None:
+    enter=_enter_url_new()   # 이 컴퓨터용 열쇠로 만든 ★1회용 주소(메모리에만 둔다 · 쓰면 버린다)
+    _hosts,_why,_mode=_bind_plan()   # ★_mode = 열린 길("vpn"·"wifi"·"") — 안내문이 길마다 정반대다
+    _phone_on=len(_hosts)>1
+    if _cfg_live().get("폰접속허용") and _why:
+        print(f"  ※ 폰 접속을 켜 두셨지만 아직 열지 못했습니다 — {_why}")
+    # ★여기서 무조건 옛 서버를 정리하지 않는다 — 포트가 비어 있어도 남의 프로그램을 찾아
+    #   죽이러 나서기 때문이다. 아래 :바인딩 실패 때만(그것도 포트 점유일 때만) 정리한다.
+    #   127.0.0.1 은 항상 첫 순서라, 옛 서버가 물고 있으면 거기서 잡혀 결국 정리된다
+    #   ⇒ "항상 최신 코드로 기동"은 그대로 지켜지고, 달라지는 것은 ★포트가 비었을 때
+    #     아무도 건드리지 않는다는 것뿐이다.
+    # ★주소마다 소켓을 따로 연다. 127.0.0.1 은 사무실 컴퓨터 몫이라 늘 열고,
+    #   사설망 주소는 조건이 맞을 때만 연다. 공용 바인딩(0.0.0.0)을 쓰지 않으므로
+    #   공유기(랜) 쪽에는 어떤 경우에도 나타나지 않는다.
+    import errno as _errno
+    # ★기동 때 한 번 더 확인한다 — 나중에 누가 "폰에서 안 보인다"며 여기에 0.0.0.0 을 넣으면
+    #   교회 와이파이에 8899 가 열리고, 거기엔 사설망 암호가 없어 ★로그인 비밀번호가 그대로 흐른다.
+    for _h in _hosts:
+        if _h in FORBIDDEN_BIND:
+            print("■ 안전을 위해 시작하지 않았습니다 — 모든 주소에 여는 설정이 들어 있습니다.")
+            print("   담당자에게 이 화면을 알려 주세요(공용 바인딩 금지).")
+            return
+    servers=[]
+    for _h in _hosts:
+        for _try in range(3):
+            try:
+                servers.append(_Server((_h,PORT),H)); break  # 멀티태스킹(동시 처리) · 폰 끊김은 사고로 적지 않는다
+            except OSError as _e:
+                # ★'포트를 누가 쓰고 있다'와 '그 주소가 이 컴퓨터에 없다'는 ★다른 사고다.
+                #   주소가 없는 것(사설망이 아직 안 떴을 때)인데 포트 점유로 오해하면,
+                #   그 포트를 쓰던 ★무관한 프로그램을 죽인다. 주인님이 쓰시는 프로그램일 수 있다.
+                if getattr(_e,"errno",None) in (_errno.EADDRNOTAVAIL, _errno.EAFNOSUPPORT):
+                    print(f"  ※ {_h} 주소가 아직 이 컴퓨터에 없습니다(사설망이 안 떴을 수 있습니다) — 이 주소는 건너뜁니다.")
+                    break                      # ★아무것도 죽이지 않고 이 소켓만 포기한다
+                if _h=="127.0.0.1": _free_port(PORT)   # 포트 점유일 때만 옛 서버 정리
+                import time as _t; _t.sleep(1.0)
+        else:
+            print(f"  ※ {_h} 주소로는 열지 못했습니다(다른 프로그램이 쓰는 중일 수 있습니다).")
+    if not servers:
         print("포트를 열 수 없습니다. 브라우저만 엽니다..."); webbrowser.open(url); return
+    # ★실제로 열린 주소만 허용 목록에 넣는다 — 못 연 주소를 남겨 두면
+    #   바인딩하지도 않은 주소를 Host 검사가 계속 통과시킨다.
+    _BOUND[:] = [s.server_address[0] for s in servers]
+    _phone_on = any(h!="127.0.0.1" for h in _BOUND)   # 폰 소켓이 실제로 열렸을 때만 열렸다고 말한다
     # 바탕화면 아이콘은 뒤에서 조용히 챙긴다 — 아이콘 만드느라 프로그램이 늦게 뜨면 안 된다.
     threading.Thread(target=_ensure_desktop_icon, daemon=True).start()
     print(f"■ {C.get('교회명','')} 교회행정 웹 대시보드 실행 중 → {url}")
+    if _phone_on:
+        _pip=[h for h in _BOUND if h!="127.0.0.1"][0]
+        # ★안내문은 ★길마다 2벌이다 (2026-08-27 · 오너 결정 «와이파이 먼저, 밖은 사설망»).
+        #   같은 문장을 쓰면 둘 중 하나는 반드시 거짓이 된다 —
+        #   사설망은 «밖에서도», 와이파이는 «그 와이파이 안에서만» 이다.
+        _lab=_phone_way_label(_mode)
+        print(f"  📱 폰에서도 보실 수 있게 열려 있습니다(비밀번호 필요) → http://{_pip}:{PORT}/")
+        if _mode=="wifi":
+            print(f"     열린 길: {_lab} — ★교회·집의 ★같은 와이파이에 연결된 폰에서만 열립니다(밖에서는 안 됩니다).")
+            print("     폰이 그 와이파이에 붙어 있는지 먼저 확인해 주세요. 따로 설치하실 것은 없습니다.")
+        elif _mode=="vpn":
+            print(f"     열린 길: {_lab} — ★밖에서도(심방지·이동 중) 열립니다. 폰에도 사설망이 연결돼 있어야 합니다.")
+        print("     이 주소는 화면의 「📱 폰 접속 설정」 카드에도 적혀 있습니다.")
+    for s in servers[1:]:          # 사설망 소켓은 뒤에서 돌린다
+        threading.Thread(target=s.serve_forever, daemon=True).start()
     if not os.environ.get("CHURCH_NOOPEN"):   # 업데이트 자동 재시작 시엔 새 탭 안 엶(F5로 갱신)
         print("  브라우저가 자동으로 열립니다. 종료: 이 창을 닫으세요.")
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        # ★들어가는 열쇠는 화면에 찍지 않는다. 이 창의 글자는 목사님이 사진으로 찍어 보내시거나
+        #   기록 파일에 섞여 나갈 수 있다. 안 열렸으면 ★이 프로그램이 다시 열어 드린다.
+        print("  (브라우저가 안 열렸으면 이 창에서 [Enter] 를 한 번 눌러 주세요 — 다시 열어 드립니다)")
+        threading.Timer(1.0, lambda: webbrowser.open(enter)).start()
+        # ★[Enter] 로 다시 열 때는 ★새 열쇠로 새 주소를 만든다 — 처음 주소는 한 번 쓰면 죽는다.
+        threading.Thread(target=_reopen_loop, args=(_enter_url_new,), daemon=True).start()
+    httpd=servers[0]
     try: httpd.serve_forever()
     except KeyboardInterrupt: print("\n종료합니다.")
 
