@@ -269,20 +269,29 @@ def _openfile(p):
     try: os.startfile(q)
     except Exception: pass
 def _savedoc(d, out):
-    """docx 저장 + 존재·크기 검증 + 생성 즉시 열기. 파일이 열려 있으면(PermissionError) 시각 붙여 새 이름으로 재시도(덮어쓰기 실패 방지)."""
+    """docx 저장 + 존재·크기 검증 + 생성 즉시 열기. 파일이 열려 있으면(PermissionError) 시각 붙여 새 이름으로 재시도.
+       ★반환값은 «실제로 저장한 경로»다(실패면 None).
+       ★왜 바꿨나: 예전에는 True/False 만 돌려줘서, 이름이 바뀌어 저장된 경우 호출부의 ✅ 줄이
+         ★있지도 않은 옛 경로를 말했다. 2026-08-29 실제로 그것 때문에 검증하던 사람이 ★옛 파일을 읽고
+         «수리가 안 됐다»고 판단할 뻔했다. ★조용히 다른 데 저장하는 것이 그 사고의 뿌리다."""
+    renamed=None
     try:
         d.save(out)
     except PermissionError:
         base,ext=os.path.splitext(out); out=f"{base}_{datetime.datetime.now().strftime('%H%M%S')}{ext}"
+        renamed=out
         try: d.save(out)
         except Exception as e:
-            print(f"✗ 문서 저장 실패({os.path.basename(out)}): {e}"); return False
+            print(f"✗ 문서 저장 실패({os.path.basename(out)}): {e}"); return None
     except Exception as e:
-        print(f"✗ 문서 저장 실패({os.path.basename(out)}): {e}"); return False
+        print(f"✗ 문서 저장 실패({os.path.basename(out)}): {e}"); return None
     if not (os.path.exists(out) and os.path.getsize(out)>0):
-        print(f"✗ 문서가 실제로 저장되지 않았습니다(제목이 너무 길거나 경로 문제): {out}"); return False
+        print(f"✗ 문서가 실제로 저장되지 않았습니다(제목이 너무 길거나 경로 문제): {out}"); return None
+    if renamed:
+        # ★이름이 바뀐 사실 자체를 말한다 — 말없이 다른 이름으로 저장하면 «옛 파일»을 열어 보게 된다.
+        print(f"※ 같은 이름의 문서가 열려 있어 «{os.path.basename(renamed)}» 라는 새 이름으로 저장했습니다(먼저 열려 있던 문서는 그대로 둡니다).")
     _openfile(out)
-    return True
+    return out
 def _hwp_running():
     """한글(Hwp.exe)이 지금 켜져 있는가 — 켜져 있는 개수를 돌려준다(0이면 안 켜져 있음).
        ★못 쟀으면 None 을 돌려준다. None 을 0으로 접지 마라 —
@@ -345,10 +354,13 @@ def _parse_family(s):
 
 # 교인 확장 필드 매핑 (flag → 저장키) — 등록·수정 공용
 _MEMFLD=[("sex","성별"),("birth","생년월일"),("birthtype","생일양음"),("tel","연락처"),("addr","주소"),
-         ("role","직분"),("cell","소속셀"),("leader","인도자"),
+         ("role","직분"),("cell","구역(셀)"),("leader","인도자"),
          ("baptism","세례"),("baptismdate","세례일"),("catechism","학습일"),("infantbaptism","유아세례일"),("confirm","입교일"),
          ("regpath","등록경로"),("prevchurch","이전교회"),("transferdate","전입일"),
          ("edu","학력"),("job","직장"),("marital","결혼상태"),("wedding","결혼기념일"),("car","차량"),("cycle","심방주기"),("memo","메모")]
+# ★'등록 구분'(newf)은 ★이 목록에 넣지 않는다 — 여기 든 칸은 «적은 값을 그대로 덮어쓰는» 칸이다.
+#   등록 구분은 상태·유형·정착여부 여러 칸을 함께 건드려야 해서 member_add 안에서 따로 다룬다.
+#   (여기 넣으면 m["newf"] 라는 뜻 없는 칸이 자료에 생긴다)
 
 def member_add(a):
     """교우 등록·수정 & 조회 (하나의 카드) — 새 이름이면 등록, 이미 있으면 입력한 칸만 수정, 이름만 넣으면 조회."""
@@ -379,15 +391,197 @@ def member_add(a):
        "학력":(getattr(a,"edu",None) or ""),"직장":(getattr(a,"job",None) or ""),"차량":(getattr(a,"car",None) or ""),
        "등록일":a.date or today(),"심방주기":a.cycle or "","가족":fam,"직분이력":([{"날짜":odate,"직분":a.role,"비고":""}] if a.role else []),
        "상태":"재적","심방이력":[],"기도제목누적":[],"메모":a.memo or ""}
+    # ── 등록 구분 ─────────────────────────────────────────────────────────
+    #   ★비우면 «기존 성도»다 — 지금까지와 ★똑같이 동작한다(기본값을 바꾸지 않는다).
+    #   ★«새가족»이라고 적으신 경우에만 정착관리를 시작한다. 프로그램이 ★추측하지 않는다 —
+    #     종전에는 등록일이 최근이면 새가족으로 ★추측했고, 그래서 처음 설치하신 날
+    #     기존 교인이 전부 새가족이 됐다. 추측 대신 ★여쭙는 칸을 둔 것이 이 수리다.
+    _kind=(getattr(a,"newf",None) or "").strip()
+    if _kind and ("새가족" in _kind or _kind.lower() in ("n","new","y","1")):
+        m["상태"]="새가족"; m["유형"]="새가족"
+        m["첫방문"]=m["등록일"]; m["정착단계"]=0; m["양육기록"]=[]; m["정착여부"]="진행"
     db["교인"].append(m); save(db)
-    print(f"✅ 교우 등록: {a.name} (id={m['id']}) · 직분 {m['직분'] or '-'} · 소속셀 {m['소속셀'] or '-'} · 등록일 {m['등록일']}"+(f" · 가족 {len(fam)}명" if fam else ""))
+    print(f"✅ 교우 등록: {a.name} (id={m['id']}) · 직분 {m['직분'] or '-'} · 구역(셀) {m['소속셀'] or '-'} · 등록일 {m['등록일']}"+(f" · 가족 {len(fam)}명" if fam else ""))
+    if _is_newfamily(m):
+        print("   🌱 ★새가족으로 등록했습니다 — 정착 관리가 시작됩니다('새가족 정착 현황'에서 보입니다).")
+    else:
+        print("   · 등록 구분: 기존 성도 — 새가족 수에 포함되지 않습니다.")
+        print("     (새로 나오신 분이면 '등록 구분' 칸에 «새가족»이라고 적어 주세요)")
 
 def member_list(a):
     db=load(); ms=db["교인"]
     if a.cell: ms=[m for m in ms if m["소속셀"]==a.cell]
-    print(f"■ 교인 {len(ms)}명"+(f" (셀:{a.cell})" if a.cell else ""))
+    print(f"■ 교인 {len(ms)}명"+(f" (구역(셀):{a.cell})" if a.cell else ""))
     for m in ms:
         print(f"  #{m['id']:>3} {(m['이름'] or '(이름 미입력)'):<8} {m['직분'] or '':<6} {m['소속셀'] or '':<8} 심방 {len(m['심방이력'])}회 {m['연락처']}")
+
+def _reg_no(m):
+    """★등록번호 = 그분이 교회에 ★처음 오신 날 (2006-08-02 → 20060802).
+
+       ★목사님 말씀 그대로다 — «그 사람 등록이 번호예요. 2006년 8월 2일 날 그분이 교회를
+         오셨다, 그럼 그분 번호가 2006년 8월 2일이에요» (2026-08-27 통화).
+       ★등록일이 없으면 ★빈 값을 돌려준다. 0 으로 만들지 않는다 —
+         0 으로 만들면 등록일을 모르는 분이 «가장 먼저 오신 분»으로 ★맨 앞에 서 버린다.
+         모르는 것은 «모른다» 자리에 두고, 몇 분인지 ★세어서 알려 드린다."""
+    n="".join(c for c in (m.get("등록일") or "") if c.isdigit())
+    return n[:8] if len(n)>=8 else ""
+
+def _reg_years(m):
+    """교회에 다니신 햇수(만). 등록일을 모르면 None."""
+    n=_reg_no(m)
+    if not n: return None
+    try: d=datetime.date(int(n[:4]),int(n[4:6]),int(n[6:8]))
+    except ValueError: return None
+    t=datetime.date.today()
+    return t.year-d.year-((t.month,t.day)<(d.month,d.day))
+
+def _years_말(햇수):
+    """햇수를 ★목사님이 읽으실 말로 바꾼다.
+       ★«0년째»라고 쓰지 않는다 — 사람은 그렇게 말하지 않는다. 「1년 미만」이라고 쓴다."""
+    if 햇수 is None: return ""
+    return "1년 미만" if 햇수<=0 else f"{햇수}년째"
+
+def _pad(s, 칸):
+    """★한글은 두 칸을 차지한다 — 그것을 세어 줄을 맞춘다.
+       ★파이썬 기본 `<8` 은 글자 수만 세므로 한글이 섞이면 ★삐뚤어진다.
+         목사님이 보시는 것은 «명단»이지 «글자 수»가 아니다."""
+    s=s or ""
+    폭=sum(2 if ('가'<=c<='힣' or '一'<=c<='鿿'
+                 or '㄰'<=c<='㆏' or '！'<=c<='｠') else 1 for c in s)
+    return s+" "*max(0,칸-폭)
+
+def member_roster(a):
+    """📜 교인 명단 — 교회 등록순(먼저 오신 분부터) · 가나다순
+
+       ★왜 만들었나 (2026-08-27 목사님 통화):
+         «교적부를 딱 누르면 가나다순으로 찾는다. 그렇게 찾지만 ★교회 온 순으로
+          그거를 좀 앞에 넣어주면 좋겠다. 그렇게 하면 우리 교회에 누가 ★가장 먼저
+          등록했는지 딱 나온다. 우리 교회 누가 오래 다녔는지를 아는 거예요.»
+       ★두 순서를 ★한 카드에 담는다 — 같은 명단의 다른 형태이기 때문이다."""
+    db=load(); ms=db["교인"]
+    셀=(getattr(a,"cell",None) or "").strip()
+    if 셀: ms=[m for m in ms if (m.get("소속셀") or "")==셀]
+    기준=(getattr(a,"sort",None) or "").strip()
+
+    가나다 = ("가나다" in 기준) or ("이름" in 기준)
+    최근   = ("최근" in 기준) or ("나중" in 기준)
+
+    있음=[m for m in ms if _reg_no(m)]
+    없음=[m for m in ms if not _reg_no(m)]
+
+    if 가나다:
+        차례=sorted(ms, key=lambda m:(m.get("이름") or "")); 없음=[]
+        머리="가나다순"
+    else:
+        차례=sorted(있음, key=lambda m:(_reg_no(m), m.get("이름") or ""), reverse=최근)
+        머리="최근 등록순 (나중에 오신 분부터)" if 최근 else "교회 등록순 (먼저 오신 분부터)"
+
+    print(f"■ 📜 교인 명단 — {머리}"+(f"  ·  구역(셀) {셀}" if 셀 else "")+f"  ·  모두 {len(ms)}명")
+    if not ms:
+        print("  (아직 등록된 교우가 없습니다 — '교우 등록·수정' 카드로 넣어 주세요.)"); return
+    if not 가나다:
+        print("   ※ 등록번호는 그분이 ★교회에 처음 오신 날입니다 (2006-08-02 → 20060802).")
+    print("─"*66)
+    for i,m in enumerate(차례,1):
+        번호=_reg_no(m); 햇수=_reg_years(m)
+        상태=(m.get("상태") or "")
+        꼬리=[]
+        if 햇수 is not None: 꼬리.append(_years_말(햇수))
+        if 상태 and 상태!="재적": 꼬리.append(상태)
+        print(f"  {i:>3}. {(번호 or '        ')}  {_pad(m.get('이름') or '(이름 미입력)',18)}"
+              f" {_pad(m.get('직분') or '',8)} {_pad(m.get('소속셀') or '',14)}"
+              f" {(m.get('등록일') or '')}"+("  · "+" · ".join(꼬리) if 꼬리 else ""))
+    if 차례 and not 가나다 and not 최근:
+        첫=차례[0]
+        print("─"*66)
+        print(f"  🏛  우리 교회에 가장 먼저 오신 분: {첫.get('이름') or '(이름 미입력)'}"
+              f"  ·  {첫.get('등록일') or ''}"
+              + (f"  ·  {_years_말(_reg_years(첫))}" if _reg_years(첫) is not None else ""))
+    # ★못 센 분을 ★조용히 빠뜨리지 않는다 — 빠진 줄을 모르면 명단이 거짓말이 된다
+    if 없음:
+        print("─"*66)
+        print(f"  ⓘ 등록일이 아직 비어 있는 분 {len(없음)}명 — 이 순서에는 넣지 못했습니다"
+              " (등록일을 넣으시면 제자리에 들어갑니다):")
+        print("     "+", ".join((m.get("이름") or "(이름 미입력)") for m in 없음[:20])
+              + (f" … 외 {len(없음)-20}명" if len(없음)>20 else ""))
+    # ★지금 보고 계신 방식은 다시 권하지 않는다 — 이미 하고 계신 일을 시키는 말은 못 쓰는 문장이다
+    print("─"*66)
+    if not 가나다: print("  · 이름순(가나다)으로 보시려면 «정렬» 칸에 «가나다» 라고 적어 주세요.")
+    if not 최근 and not 가나다: print("  · 최근 오신 분부터 보시려면 «최근» 이라고 적어 주세요.")
+    if 가나다 or 최근: print("  · 먼저 오신 분부터 보시려면 «정렬» 칸을 비우고 실행해 주세요.")
+
+def sms_open(a):
+    """📱 폰에서 문자 보내기 — 문자 앱을 ★열어 드립니다(보내기는 목사님이 누르십니다).
+
+       ★★정직 표기 (오너 규율: «안 되는 걸 된다고 해 놓으면 그 순간 신뢰가 무너진다»):
+         이 카드는 문자를 ★보내지 않는다. 폰의 문자 앱을 ★받는 사람과 문구가 채워진 채로
+         «열어» 줄 뿐이고, ★보내기 단추는 목사님이 그 앱에서 직접 누르신다.
+         ⇒ 그래서 발송 대행업체를 쓰지 않고, ★프로그램 때문에 드는 돈이 없다.
+         ⇒ 그리고 ★사무실 컴퓨터에서는 문자 앱이 없어 열리지 않는다 — 그 사실도 화면에 적는다."""
+    db=load()
+    이름들=[s.strip() for s in (getattr(a,"names",None) or "").replace(",",";").split(";") if s.strip()]
+    문구=(getattr(a,"text",None) or "").strip()
+    셀=(getattr(a,"cell",None) or "").strip()
+
+    대상=[]
+    못찾음=[]
+    if 이름들:
+        for nm in 이름들:
+            hit=find(db,nm)
+            if hit: 대상.append(hit[0])
+            else:   못찾음.append(nm)
+    elif 셀:
+        대상=[m for m in db["교인"] if (m.get("소속셀") or "")==셀]
+    else:
+        print("■ 📱 폰에서 문자 앱 열기")
+        print("  받으실 분 이름을 넣어 주세요 (여러 분이면 ; 로 구분 · 예: 김동철; 이영희).")
+        print("  구역(셀) 이름만 넣으시면 그 구역 전체가 나옵니다.")
+        print("")
+        print("  ※ 이 카드는 문자를 ★보내지 않습니다 — 하는 일은 «문자 앱을 여는 주소를 만드는 것»까지입니다.")
+        print("     보내기는 목사님이 문자 앱에서 직접 누르셔야 합니다.")
+        print("  ※ ★2026-08-28 기준, 실제 폰에서 문자 앱이 뜨는 것은 ★아직 확인하지 못했습니다.")
+        return
+
+    print("■ 📱 폰에서 문자 앱 열기"+(f"  ·  구역(셀) {셀}" if 셀 and not 이름들 else ""))
+    print("  ※ 프로그램이 문자를 ★보내지 않습니다 — 하는 일은 «문자 앱을 여는 주소를 만드는 것»까지이고,")
+    print("     ★보내기는 목사님이 문자 앱에서 직접 누르셔야 합니다.")
+    print("  ※ ★2026-08-28 기준, 실제 폰에서 문자 앱이 뜨는 것은 ★아직 확인하지 못했습니다 —")
+    print("     그래서 «열립니다»라고 적지 않습니다. 폰에서 눌러 보시고 안 되면 알려 주십시오.")
+    print("     그래서 문자 발송 업체를 쓰지 않고, ★이 프로그램 때문에 드는 돈은 없습니다.")
+    print("     (문자 요금 자체는 목사님 휴대폰 요금제대로입니다.)")
+    print("  ※ ★사무실 컴퓨터에는 문자 앱이 없어 열리지 않을 것입니다 — ★폰에서 눌러 주세요.")
+    if 문구:
+        print("─"*66)
+        print("  ▼ 문자 앱에 미리 채워질 문구")
+        for ln in 문구.split("\n"): print("     "+ln)
+    print("─"*66)
+
+    있음=0; 번호없음=[]
+    for m in 대상:
+        tel=(m.get("연락처") or "").strip()
+        이름=m.get("이름") or "(이름 미입력)"
+        직=(m.get("직분") or "").strip()
+        호칭=f"{이름} {직}님" if 직 else f"{이름}님"
+        if not tel:
+            번호없음.append(이름); continue
+        있음+=1
+        print(f"  · {호칭}  {tel}")
+        print(f"▶문자|{tel}|{문구}|{호칭}께 문자 앱 열기")
+    if 못찾음:
+        print("─"*66)
+        print(f"  ⓘ 교적에서 못 찾은 이름 {len(못찾음)}명: "+", ".join(못찾음))
+        print("     (이름이 정확한지 확인해 주세요 — 없는 분께는 문자 앱을 열 수 없습니다.)")
+    if 번호없음:
+        print("─"*66)
+        print(f"  ⓘ 연락처가 아직 비어 있는 분 {len(번호없음)}명: "+", ".join(번호없음[:20])
+              + (f" … 외 {len(번호없음)-20}명" if len(번호없음)>20 else ""))
+        print("     ('교우 등록·수정' 카드에서 연락처를 넣으시면 여기에 단추가 생깁니다.)")
+    print("─"*66)
+    print(f"  · 문자 앱을 열 수 있는 분 {있음}명"
+          + (f" · 못 여는 분 {len(번호없음)+len(못찾음)}명" if (번호없음 or 못찾음) else ""))
+    if not 문구:
+        print("  · «문구» 칸을 채우시면 문자 앱에 그 내용이 ★미리 적힌 채로 열립니다.")
+        print("    ('생일·결혼기념일 축하'나 '축하·위로 문자' 카드에서 만든 문구를 붙여 넣으셔도 됩니다.)")
 
 def member_show(a):
     db=load(); hit=find(db,a.name)
@@ -398,8 +592,8 @@ def member_show(a):
     if bd:
         ym=m.get("생일양음","")
         print(f"  생년월일: {bd}"+(f" ({ym})" if ym else ""))
-    for k in ["성별","연락처","주소","직분","소속셀","인도자","학력","직장","결혼상태","차량","등록일","상태"]:
-        if m.get(k): print(f"  {k}: {m[k]}")
+    for lbl,k in [("성별","성별"),("연락처","연락처"),("주소","주소"),("직분","직분"),("구역(셀)","소속셀"),("인도자","인도자"),("학력","학력"),("직장","직장"),("결혼상태","결혼상태"),("차량","차량"),("등록일","등록일"),("상태","상태")]:
+        if m.get(k): print(f"  {lbl}: {m[k]}")
     sac=[f"{lbl} {m.get(key)}" for lbl,key in [("유아세례","유아세례일"),("학습","학습일"),("세례","세례일"),("입교","입교일")] if m.get(key)]
     if not sac and m.get("세례"): sac=[f"세례 {m.get('세례')}"]
     if sac: print("  성례: "+" · ".join(sac))
@@ -420,7 +614,7 @@ def member_update(a):
     if not hit: print(f"✗ '{a.name}' 없음 — 먼저 '교우 등록'에서 등록해 주세요."); return
     m=hit[0]
     FLD=[("sex","성별"),("birth","생년월일"),("birthtype","생일양음"),("tel","연락처"),("addr","주소"),
-         ("role","직분"),("cell","소속셀"),("leader","인도자"),
+         ("role","직분"),("cell","구역(셀)"),("leader","인도자"),
          ("baptism","세례"),("baptismdate","세례일"),("catechism","학습일"),("infantbaptism","유아세례일"),("confirm","입교일"),
          ("regpath","등록경로"),("prevchurch","이전교회"),("transferdate","전입일"),
          ("edu","학력"),("job","직장"),("marital","결혼상태"),("wedding","결혼기념일"),("car","차량"),("memo","메모")]
@@ -497,7 +691,7 @@ def office_list(a):
     if m.get("세례일"): print(f"  세례일: {m['세례일']}")
     if m.get("심방주기"): print(f"  심방주기: {m['심방주기']}")
 def group_add(a):
-    """소그룹(셀/구역/목장) 등록 — 리더·모임요일·장소."""
+    """소그룹(구역(셀)/목장/속회) 등록 — 리더·모임요일·장소."""
     if not a.name: print("⚠ 소그룹 이름을 입력해 주세요."); return
     db=load(); db.setdefault("소그룹",[])
     db["소그룹"].append({"이름":a.name or "","리더":a.leader or "","부리더":a.subleader or "","요일":a.day or "","장소":a.place or "","메모":a.memo or "","보고":[]})
@@ -508,7 +702,7 @@ def group_list(a):
     for g in gs:
         n=len([m for m in db["교인"] if m.get("소속셀")==g["이름"]])
         print(f"  · {g['이름']} — 리더 {g.get('리더','')} · 조원 {n}명 · {g.get('요일','')} {g.get('장소','')}")
-    if not gs: print("  (없음 — '소그룹(셀) 등록'에서 등록해 주세요)")
+    if not gs: print("  (없음 — '소그룹(구역·셀) 등록'에서 등록해 주세요)")
 def group_assign(a):
     """교인을 소그룹에 배정."""
     db=load(); hit=find(db,a.name)
@@ -527,12 +721,12 @@ def group_roster(a):
         for j,v in enumerate([m["이름"],m.get("직분",""),m.get("연락처",""),""]):
             ctext(t.rows[i].cells[j],v,10,GRAY,font=SERIF)
     tborders(t,"BBBBBB",4)
-    out=os.path.join(CAT("04"),f"[소그룹명단] {sanit(a.name)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("04"),f"[소그룹명단] {sanit(a.name)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 소그룹 명단: {out} ({len(members)}명)")
 def group_report(a):
     """주간 소그룹 보고 — 모임·참석·나눔·기도제목·결석자(누적)."""
     db=load(); g=next((x for x in db.get("소그룹",[]) if x["이름"]==a.name), None)
-    if not g: print(f"✗ 소그룹 '{a.name}' 없음 — 먼저 '소그룹(셀) 등록'에서 등록해 주세요"); return
+    if not g: print(f"✗ 소그룹 '{a.name}' 없음 — 먼저 '소그룹(구역·셀) 등록'에서 등록해 주세요"); return
     g.setdefault("보고",[]).append({"날짜":a.date or today(),"참석":a.attend or "","나눔":a.note or "","기도제목":a.prayer or "","결석":a.absent or ""})
     save(db); print(f"✅ [{a.name}] 주간보고 기록: {a.date or today()} · 참석 {a.attend or ''} · 결석 {a.absent or ''}")
 def train_add(a):
@@ -565,9 +759,9 @@ def train_list(a):
             for name,s in people: print(f"      - {name} [{s}]")
         if not by: print("  (없음 — '양육·제자훈련 기록'에서 기록해 주세요)")
 def group_form(a):
-    """셀·구역 주간 보고서 양식(인쇄용 빈 양식) — 셀리더이 손으로 작성용."""
+    """구역(셀) 주간 보고서 양식(인쇄용 빈 양식) — 구역장이 손으로 작성용."""
     d=newdoc()
-    para(d,f"{CHURCH} 셀·구역 주간 보고서",19,NAVY,True,AL.CENTER,after=2,font=SANS)
+    para(d,f"{CHURCH} 구역(셀) 주간 보고서",19,NAVY,True,AL.CENTER,after=2,font=SANS)
     if a.name: para(d,a.name,12,MAROON,True,AL.CENTER,after=4,font=SANS)
     hr(d,"3C6E3C",12)
     def frow(labels):
@@ -576,16 +770,16 @@ def group_form(a):
             lc=t.rows[0].cells[j*2]; vc=t.rows[0].cells[j*2+1]
             ctext(lc,lab,10,WHITE,True,SANS,AL.CENTER); shade(lc,"3C6E3C"); lc.width=Cm(3); vc.width=Cm(5.5)
         tborders(t,"BBBBBB",4)
-    for labs in [["셀/구역","셀리더"],["모임일시","장소"],["참석 인원","결석 인원"]]: frow(labs)
+    for labs in [["구역(셀)","구역장"],["모임일시","장소"],["참석 인원","결석 인원"]]: frow(labs)
     def area(title,n):
         para(d,title,11,RGBColor(0x3C,0x6E,0x3C),True,before=8,after=3,font=SANS)
         t=d.add_table(rows=n,cols=1)
         for r in t.rows: r.cells[0].width=Cm(17)
         tborders(t,"BBBBBB",4)
     area("나눈 말씀·나눔 내용",4); area("기도 제목",3); area("심방 요청",2); area("결석자 명단",2); area("특이사항·건의",2)
-    para(d,f"셀리더 서명 :               · {CHURCH}",9,LG,align=AL.RIGHT,before=8,font=SANS)
-    out=os.path.join(CAT("04"),f"[셀보고서양식] {sanit(a.name or '셀')}_{today()}.docx"); _savedoc(d,out)
-    print(f"✅ 셀 주간보고서 양식: {out}")
+    para(d,f"구역장 서명 :               · {CHURCH}",9,LG,align=AL.RIGHT,before=8,font=SANS)
+    out=os.path.join(CAT("04"),f"[구역보고서양식] {sanit(a.name or '구역')}_{today()}.docx"); out=_savedoc(d,out) or out
+    print(f"✅ 구역(셀) 주간보고서 양식: {out}")
 
 # ───────── 명령: 심방(핵심) ─────────
 def _visit_briefing(m):
@@ -662,7 +856,7 @@ def visit_daesim(a):
         para(d,f"  · {m['이름']} {m.get('직분','') or ''} ({m.get('소속셀','') or '-'}) — {m.get('연락처','') or ''}",10.5,after=1)
     if not notyet: para(d,"  (전 세대 완료! 🎉)",10,LG,after=1)
     para(d,"※ 심방 기록 시 '구분'에 '춘계대심방' 또는 '추계대심방'을 넣으면 이 현황에 집계됩니다.",9,LG,before=8,font=SANS)
-    out=os.path.join(CAT("04"),f"[대심방현황] {sanit(yr)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("04"),f"[대심방현황] {sanit(yr)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 대심방 현황: {out}  (완료 {len(done)}/{total}세대 · {pct}%)")
 def visit_brief(a):
     """다음 심방 전 브리핑 — 반복 방지(심방 기록 카드에 통합됨, CLI 호환용 유지)."""
@@ -724,7 +918,7 @@ def cert(a):
         para(d,today().replace('-','년 ',1).replace('-','월 ')+"일",11,GRAY,AL.CENTER,after=16)
         para(d,f"{CHURCH}  당회장  {PASTOR}   (인)",13,NAVY,True,AL.CENTER,font=SANS)
         out=os.path.join(CAT("06"),f"[발급] {title}_{sanit(m['이름'])}_{today()}.docx")
-    _savedoc(d,out); _cert_ledger(db,no,kind,a.name,a.purpose,out); save(db)
+    out=_savedoc(d,out) or out; _cert_ledger(db,no,kind,a.name,a.purpose,out); save(db)
     print(f"✅ {title} 발급(제 {no} 호): {out}")
 def cert_ledger(a):
     """🗂️ 발급대장 — 지금까지 발급한 증명서·상장 목록(문서번호·발급일·종류·대상·용도)."""
@@ -743,13 +937,38 @@ def attend_add(a):
 def finance_add(a):
     if not a.amount:
         return finance_sum(a)   # 금액 없으면 재정 요약 보기(기록 & 요약 통합)
-    db=load(); db["재정"].append({"날짜":a.date or today(),"구분":a.kind or "수입","항목":a.item or "","금액":a.amount or 0,
+    # ★★재정 구분 수리 (master 판정 2026-08-28 · worker-2 전수 실기에서 나온 결함)
+    #   ★조용한 기본값(`or "수입"`)을 없앤다 — 결측을 값으로 접는 것이 이 프로그램의 반복 무늬다.
+    #   ★왜 이 자리가 가장 나쁜가: 종전에는 «수입»·«지출»이 아닌 구분도 그대로 저장됐는데
+    #     재정 요약은 그 둘만 합산한다 ⇒ ★장부에는 있는 돈이 요약에서 사라진다.
+    #     그런데 «(N건)» 은 전체를 세므로 ★건수는 맞고 금액만 틀린다 — 알아채기 가장 어렵다.
+    #     (실측: 수입 100,000 + «세례» 300,000 + 빈칸 50,000 → 요약 «수입 150,000원 (3건)» · 장부 450,000원)
+    #   ★그리고 빈 칸이 «수입»으로 둔갑하면 ★지출을 넣으려다 칸을 비우신 것이 수입이 된다.
+    #   ⇒ 저장하지 않고 ★되묻는다. 교회 돈이라 «조용히 넘어가기»가 가장 위험하다.
+    _kind=(getattr(a,'kind','') or "").strip()
+    if _kind not in ("수입","지출"):
+        print("⚠ '구분' 칸에 «수입» 또는 «지출» 중 하나를 넣어 주세요"
+              + (f" — 지금 넣으신 값: «{_kind}»" if _kind else " — 지금은 비어 있습니다") + ".")
+        print("   ★비워 두시면 «수입»으로 넣지 않습니다 — 지출을 수입으로 잘못 적으면 결산이 통째로 틀어지기 때문입니다.")
+        print("   (헌금·후원은 «수입» · 사례비·선교비·관리비·구제비 등은 «지출» 입니다.)")
+        print("   ※ 이번 것은 ★저장하지 않았습니다.")
+        return
+    db=load(); db["재정"].append({"날짜":a.date or today(),"구분":_kind,"항목":a.item or "","금액":a.amount or 0,
         "교인":a.name or "","부서":(getattr(a,'dept','') or "").strip(),"메모":a.memo or ""}); save(db)
-    print(f"✅ 재정 기록: {a.date or today()} [{a.kind or '수입'}] {a.item or ''} {a.amount or 0:,}원"+(f" · 부서 {a.dept}" if getattr(a,'dept','') else ""))
+    print(f"✅ 재정 기록: {a.date or today()} [{_kind}] {a.item or ''} {a.amount or 0:,}원"+(f" · 부서 {a.dept}" if getattr(a,'dept','') else ""))
 def finance_sum(a):
     db=load(); rec=[r for r in db["재정"] if (not a.month or r["날짜"].startswith(a.month))]
     inc=sum(r["금액"] for r in rec if r["구분"]=="수입"); exp=sum(r["금액"] for r in rec if r["구분"]=="지출")
     print(f"■ 재정 요약{f' ({a.month})' if a.month else ''}: 수입 {inc:,}원 · 지출 {exp:,}원 · 잔액 {inc-exp:,}원 ({len(rec)}건)")
+    # ★이미 장부에 들어가 있는 «수입도 지출도 아닌» 기록을 ★조용히 빼지 않는다.
+    #   앞으로는 저장 단계에서 막지만(위 finance_add), ★예전에 들어간 것은 그대로 남아 있다.
+    #   그것을 말하지 않으면 «건수는 맞는데 금액이 안 맞는» 그 화면이 그대로 이어진다.
+    _기타=[r for r in rec if r.get("구분") not in ("수입","지출")]
+    if _기타:
+        _합=sum(r.get("금액",0) for r in _기타)
+        print(f"  ⚠ 그중 {len(_기타)}건({_합:,}원)은 '구분'이 «수입»도 «지출»도 아니어서 ★위 합계에 들어가지 않았습니다.")
+        print("     구분값: "+", ".join(sorted({str(r.get('구분') or '(빈칸)') for r in _기타})[:6]))
+        print("     → '재정 출납부(원장)'에서 그 줄을 찾아 '구분'을 «수입»/«지출»로 고쳐 주시면 합계에 잡힙니다.")
 def finance_stats(a):
     """재정 통계(JSON) — 월별 수입·지출·헌금종류별·지출항목별·부서별·예산집행. 웹 그래프(시각화)용."""
     import json as _j, datetime as _dt
@@ -850,7 +1069,7 @@ def _finance_annual(db,recs,yr):
         tborders(dt,"BBBBBB",4)
     para(d,f"■ 연간 총계 — 수입 {ti:,}원 · 지출 {te:,}원 · 잔액 {ti-te:,}원",13,MAROON,bold=True,before=12,font=SANS)
     para(d,"재정부장 (인)              회      계 (인)              담임목사 (인)",11,GRAY,align=AL.CENTER,before=20,font=SANS)
-    out=os.path.join(CAT("06"),f"[연간재정총결산] {sanit(yr)}년_{today()}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[연간재정총결산] {sanit(yr)}년_{today()}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ {yr}년 재정 총결산: {out}")
     print(f"   수입 {ti:,}원 · 지출 {te:,}원 · 잔액 {ti-te:,}원 · {len(yrecs)}건 · 부서 {len(dept)}개")
 def finance_report(a):
@@ -906,7 +1125,7 @@ def finance_report(a):
         if bold: shade(t.rows[i].cells[0],"FBF3E4"); shade(t.rows[i].cells[1],"FBF3E4")
     tborders(t,"BBBBBB",4)
     para(d,"재정부장 (인)              회      계 (인)              담임목사 (인)",11,GRAY,AL.CENTER,before=20,font=SANS)
-    out=os.path.join(CAT("06"),f"[주일재정결산] {d1}{'' if d1==d2 else '_'+d2}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[주일재정결산] {d1}{'' if d1==d2 else '_'+d2}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ 주일 재정 결산서: {out}")
     print(f"   수입 {inc_tot:,}원 · 지출 {exp_tot:,}원 · 당주잔액 {net:,}원 · 차주이월 {carry:,}원 (기록 {len(period)}건)")
     if not period: print("   ※ 이 기간 재정 기록이 없습니다 — 먼저 '재정 기록(수입/지출)'에서 헌금·지출을 입력해 주세요.")
@@ -927,7 +1146,7 @@ def finance_items(a):
     _grid("■ 헌금 종류 (수입)",_heongeum(),"1F5C9E")
     _grid("■ 지출 항목",_jichul(),"8B2E2E")
     para(d,"※ 위 목록에 없는 항목도 자유롭게 입력할 수 있습니다(결산서 맨 아래에 표시됩니다).",9.5,LG,before=8,font=SANS)
-    out=os.path.join(CAT("06"),f"[재정항목표] {today()}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[재정항목표] {today()}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ 재정 표준 항목표: {out}")
     print("  헌금 종류:", " · ".join(_heongeum()[:12]), "...")
     print("  지출 항목:", " · ".join(_jichul()[:12]), "...")
@@ -1012,7 +1231,7 @@ def budget_status(a):
         if bd: shade(t.rows[i].cells[0],"FBF3E4"); shade(t.rows[i].cells[1],"FBF3E4")
     tborders(t,"BBBBBB",4)
     para(d,"재정부장 (인)              회      계 (인)              담임목사 (인)",11,GRAY,align=AL.CENTER,before=20,font=SANS)
-    out=os.path.join(CAT("06"),f"[예산집행현황] {yr}년_{today()}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[예산집행현황] {yr}년_{today()}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ {yr}년 예산 대비 집행 현황: {out}")
     print(f"   수입 예산 {ib:,} / 실적 {ia:,}원 · 지출 예산 {xb:,} / 집행 {xa:,}원")
     over=[k for k in yb.get('지출',{}) if act_out.get(k,0)>yb['지출'].get(k,0)]
@@ -1053,7 +1272,7 @@ def budget_plan(a):
     _plan_table("■ 지출 예산",_jichul(),pout,"8B2E2E")
     para(d,f"※ {prev}년 실적을 참고해 각 항목 금년 예산을 정하신 뒤, 확정 금액을 '예산 편성' 카드에 입력하시면 연중 집행률이 자동 관리됩니다.",9.5,LG,before=8,font=SANS)
     para(d,"재정부장 (인)              회      계 (인)              담임목사 (인)",11,GRAY,align=AL.CENTER,before=20,font=SANS)
-    out=os.path.join(CAT("06"),f"[예산안] {yr}년도_{today()}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[예산안] {yr}년도_{today()}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ {yr}년도 예산(안) 편성 양식: {out}")
     print(f"   {prev}년 실적 참고: 수입 {sum(pin.values()):,}원 · 지출 {sum(pout.values()):,}원")
 def finance_ledger(a):
@@ -1099,7 +1318,7 @@ def finance_ledger(a):
         for j,w in enumerate([2.2,2.6,4.0,2.3,2.3,2.8]): rr.cells[j].width=Cm(w)
     tborders(t,"BBBBBB",4)
     para(d,"재정부장 (인)              회      계 (인)              담임목사 (인)",11,GRAY,AL.CENTER,before=16,font=SANS)
-    out=os.path.join(CAT("06"),f"[재정출납부] {label.replace(' ','')}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("06"),f"[재정출납부] {label.replace(' ','')}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ 재정 출납부(원장): {out}")
     print(f"   전기이월 {start:,} · 수입 {tin:,} · 지출 {tout:,} · 잔액 {run:,}원 ({len(inp)}건)")
     if not inp: print("   ※ 이 기간 재정 기록이 없습니다 — '재정 기록'으로 먼저 입력하세요.")
@@ -1122,7 +1341,7 @@ def bulletin(a):
         if w.strip(): para(d,"· "+w.strip(),11,after=2)
     para(d,"이 주의 기도",13,MAROON,True,before=8,after=3,font=SANS)
     para(d,a.pray or "  ",11,after=2)
-    out=os.path.join(CAT("07"),f"[주보] {a.date or today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[주보] {a.date or today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 주보 생성: {out}")
 
 # ───────── 명령: 교안 ─────────
@@ -1153,8 +1372,14 @@ def lesson(a):
               "⑦ 시간 배분: 도입10·전개20·적용10·정리5(예시). 전개에 다 쓰지 말고 적용·나눔 시간을 꼭 남기세요.",
               "⑧ 준비물·대안: 필요한 준비물을 미리 적고, 시간이 남거나 모자랄 때의 대안도 한 줄 준비해 두세요."]:
         para(d,t,10,after=2)
-    para(d,"※ 더 깊은 내용은 '주일학교 지도자료'·'성경교육 자료' 참고자료 카드를 함께 보세요.",9,LG,before=6,font=SANS)
-    out=os.path.join(CAT("03"),f"[교안] {sanit(a.title or '교안')}_{a.date or today()}.docx"); _savedoc(d,out)
+    # ★섹션 이름을 맞춘다 (2026-08-29) — 카드 이름은 맞는데 ★섹션 이름이 낡았다.
+    #   「목회 참고자료」 섹션은 ★없어졌고 지금은 ★「📖 자료」 다. 목사님은 이 인쇄물을 들고
+    #   ★그 이름의 섹션을 찾으신다 — 없는 이름을 적어 두면 찾다가 못 찾으신다.
+    # ★알아 둘 것(2026-08-29 실측): ★이모지는 DOCX 에 안 실린다 — 🔥·📱·💾·↩️ 전부 그렇다(★는 실린다).
+    #   그래서 이 줄은 문서에 ★「자료」 섹션 으로 찍힌다. ★화면 라벨이 「📖 자료」 라 목사님은 그대로 찾으신다.
+    #   ⇒ ★고칠 것은 없다. 다만 ★여기 이모지를 적어도 인쇄물엔 안 나온다는 것을 알고 고쳐라.
+    para(d,"※ 더 깊은 내용은 「📖 자료」 섹션의 '주일학교 지도자료'·'성경교육 자료' 카드를 함께 보세요.",9,LG,before=6,font=SANS)
+    out=os.path.join(CAT("03"),f"[교안] {sanit(a.title or '교안')}_{a.date or today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 교안 생성: {out} (작성 가이드 포함)")
 
 # ───────── 명령: Excel 동기화 ─────────
@@ -1186,7 +1411,7 @@ def export_excel(a):
             ws.column_dimensions[chr(64+j)].width=max(10,len(str(h))*2+4)
         return ws
     wb.remove(wb.active)
-    sheet("교인명부",["ID","이름","성별","생년월일","연락처","주소","직분","세례","소속셀","인도자","등록일","상태"],
+    sheet("교인명부",["ID","이름","성별","생년월일","연락처","주소","직분","세례","구역(셀)","인도자","등록일","상태"],
         [[m.get("id",""),m.get("이름",""),m.get("성별",""),m.get("생년월일",""),m.get("연락처",""),m.get("주소",""),m.get("직분",""),m.get("세례",""),m.get("소속셀",""),m.get("인도자",""),m.get("등록일",""),m.get("상태","")] for m in db.get("교인",[])],"3C6E3C")
     vrows=[]
     for m in db.get("교인",[]):
@@ -1219,11 +1444,16 @@ def setlist(a):
     if os.path.exists(idxp):
         for k,v in _j.load(open(idxp,encoding='utf-8')).items():
             idx[k]={"title":v["title"],"paths":v.get("paths",[]),"meta":{}}
-    if os.path.exists(SONGLIB):
-        for s in _j.load(open(SONGLIB,encoding='utf-8')):
-            pth=[s["악보"]] if s.get("악보") and os.path.exists(s["악보"]) and s["악보"].lower().endswith(('.jpg','.jpeg','.png')) else []
-            idx[norm(s["제목"])]={"title":s["제목"],"paths":pth,
-                "meta":{"key":s.get("key",""),"bpm":s.get("bpm",""),"작곡":s.get("작곡가",""),"가사":s.get("가사",""),"유튜브":s.get("유튜브","")}}
+    # ★④ 유령 곡 — 이 자리의 기전은 ①②와 ★다르다(master 판정 부록2).
+    #   여기서는 song_index 를 ★먼저 넣고 song_library 를 ★나중에 넣는다. 그래서 유령은
+    #   ★맨 앞이 아니라 ★뒤에 붙고, 아래 `nk in k or k in nk` 에서 ★못 찾은 곡만 가로챈다.
+    #   ⇒ 증상이 ①②보다 ★조용하다 — 「(미등록 — 등록에서 추가)」가 떠야 할 자리에
+    #     ★제목이 빈 줄이 인쇄된다. 그리고 `if not idx` 안내도 유령 때문에 안 뜬다.
+    for s in _songlib():                       # ★제목이 빈 곡은 애초에 안 들어온다
+        if not norm(s["제목"]): continue       # ★2겹 — 공백만 있는 제목도 열쇠가 되면 안 된다
+        pth=[s["악보"]] if s.get("악보") and os.path.exists(s["악보"]) and s["악보"].lower().endswith(('.jpg','.jpeg','.png')) else []
+        idx[norm(s["제목"])]={"title":s["제목"],"paths":pth,
+            "meta":{"key":s.get("key",""),"bpm":s.get("bpm",""),"작곡":s.get("작곡가",""),"가사":s.get("가사",""),"유튜브":s.get("유튜브","")}}
     if not idx: print("✗ 곡이 없습니다 — '찬양곡·자작곡 등록'에서 곡을 추가해 주세요."); return
     songs=[s.strip() for s in (a.songs or "").split(";") if s.strip()]
     size=(a.size or "A4").upper()
@@ -1257,10 +1487,31 @@ def setlist(a):
         elif m.get("가사"):
             for ln in m["가사"].split("\n"): para(d,ln,13,GRAY,align=AL.CENTER,after=2)
         else: para(d,"(악보·가사 미등록)",11,MAROON,align=AL.CENTER)
-    out=os.path.join(CAT("07"),f"[찬양콘티] {sanit(a.title or '콘티')}_{a.date or today()}_{size}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[찬양콘티] {sanit(a.title or '콘티')}_{a.date or today()}_{size}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 찬양 콘티({size}) 생성: {out}")
     print(f"   수록 {len(found)}곡"+(f" · 미등록 {len(miss)}곡: {', '.join(miss)}" if miss else ""))
 SONGDIR=os.path.join(BASE,"_내자료","찬양곡"); SONGLIB=os.path.join(SONGDIR,"song_library.json")
+
+def _songlib():
+    """등록된 찬양곡 목록을 ★읽는 단 하나의 문 — ★제목이 빈 곡은 걸러서 돌려준다.
+
+       ★왜 (2026-08-28 · 전수 실기 → master 판정 부록2):
+         배포본이 ★제목이 빈 곡 2건을 싣고 나갔다(`song_library.json` 579 B).
+         그 빈 제목은 곡을 찾는 색인에서 ★열쇠 «» 가 되는데,
+         ★빈 문자열은 모든 이름 안에 들어 있다(`"" in "무엇이든"` = 참).
+         유령이 목록 맨 앞이라 ★어떤 곡을 찾아도 유령이 먼저 걸렸고,
+         가사 스크린·찬양 가사 PPT·찬양 콘티·찬양집 ★네 카드가 함께 망가졌다.
+         (예배 프로젝터용 PPT 가 ★0장으로 나왔다 — 주일 아침에 아시면 사고다.)
+       ★자료를 비우는 것으로 끝내지 않는다 — ★자료는 또 더러워진다.
+         그래서 ★읽는 자리에서 한 번 더 막는다(2겹).
+       ★곡을 ★저장하는 자리는 이 함수를 쓰지 않는다 — 읽을 때 거르는 것과
+         ★목사님 파일에서 지우는 것은 다른 일이다(조용히 지우지 않는다)."""
+    import json as _j
+    if not os.path.exists(SONGLIB): return []
+    try: lib=_j.load(open(SONGLIB,encoding='utf-8'))
+    except Exception: return []
+    if not isinstance(lib,list): return []
+    return [s for s in lib if isinstance(s,dict) and (s.get("제목") or "").strip()]
 def song_add(a):
     """찬양곡 추가(자작곡 포함) — 제목·작곡가·key·BPM·주제·가사·악보. 콘티에서 자동 사용."""
     if not a.title: print("⚠ 곡 제목을 입력해 주세요."); return
@@ -1283,8 +1534,8 @@ def song_add(a):
     if _C.get("백업폴더"): print("  💾 USB·D에도 자동 저장됨(작곡·악보 안전 이중보관)")
 def song_list(a):
     import json as _j
-    if not os.path.exists(SONGLIB): print("등록 곡 없음 — '찬양곡·자작곡 등록'에서 추가해 주세요."); return
-    lib=_j.load(open(SONGLIB,encoding='utf-8'))
+    lib=_songlib()          # ★제목이 빈 유령 곡은 세지 않는다(2026-08-28 수리)
+    if not lib: print("등록 곡 없음 — '찬양곡·자작곡 등록'에서 추가해 주세요."); return
     if a.theme: lib=[s for s in lib if a.theme in (s.get("주제","")+s.get("성경","")+s.get("제목",""))]
     print(f"■ 내 찬양곡 {len(lib)}곡"+(f" (주제:{a.theme})" if a.theme else ""))
     for i,s in enumerate(lib):
@@ -1293,8 +1544,8 @@ def song_list(a):
 def song_open(a):
     """등록된 찬양곡의 유튜브를 브라우저로 열기 — 작곡 목사님이 자기 올린 영상 바로 보기."""
     import json as _j, webbrowser
-    if not os.path.exists(SONGLIB): print("등록 곡 없음."); return
-    lib=_j.load(open(SONGLIB,encoding='utf-8'))
+    lib=_songlib()          # ★유령 곡 제외(2026-08-28 수리)
+    if not lib: print("등록 곡 없음."); return
     yt=[s for s in lib if s.get("유튜브")]
     if a.title:
         hit=[s for s in yt if a.title in s["제목"]]
@@ -1322,7 +1573,7 @@ def compose(a):
     para(d,prompt,11,GRAY,after=4)
     para(d,"※ 실제 멜로디·음원 생성은 외부 작곡도구(Suno 등, 무료/유료)에서 위 프롬프트+가사로 만드세요. 완성곡을 유튜브에 올린 뒤 '찬양곡·자작곡 등록'에서 유튜브 링크와 함께 등록하면 콘티에 자동 반영됩니다.",9,LG,before=4,font=SANS)
     folder=CAT("07")
-    out=os.path.join(folder,f"[작곡작업지] {sanit(a.title or '새찬양')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(folder,f"[작곡작업지] {sanit(a.title or '새찬양')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 작곡 작업지 생성: {out}"); print(f"   작곡 프롬프트: {prompt}")
 def video_plan(a):
     """행사 홍보영상 제작 작업지 — 스토리보드·나레이션·자막·영상AI 프롬프트·무료 편집 안내를 한 장에.
@@ -1391,7 +1642,7 @@ def video_plan(a):
     tools=[("Clipchamp","윈도우11에 이미 설치됨(설치 불필요) · 자동 자막·AI 음성·템플릿이 쉬움","★★★ 가장 쉬움"),
            ("Canva","홍보영상 템플릿 풍부 · 클릭만으로 완성 · 포스터·썸네일도 한 곳에","★★★"),
            ("CapCut","자동 자막·AI 기능 강력 · 트렌디한 템플릿","★★☆"),
-           ("DaVinci Resolve","무료인데 전문가급 · 익숙해지면 고급 편집","★☆☆")]
+           ("DaVinci Resolve","무료 · 기능이 많아 익숙해지면 고급 편집","★☆☆")]
     tt=d.add_table(rows=len(tools)+1,cols=3)
     for j,h in enumerate(["프로그램","특징","초보 적합"]):
         ctext(tt.rows[0].cells[j],h,10,WHITE,True,SANS,AL.CENTER); shade(tt.rows[0].cells[j],"1F5C9E")
@@ -1403,7 +1654,7 @@ def video_plan(a):
         tt.rows[i].cells[0].width=Cm(3.4); tt.rows[i].cells[1].width=Cm(9.0); tt.rows[i].cells[2].width=Cm(3.2)
     tborders(tt,"BBBBBB",4)
     para(d,"※ 더 자세한 도구·AI 사용법·목적별 템플릿은 ‘영상 제작·AI 완전 가이드’ 카드를 보세요.",9.5,LG,before=8,font=SANS)
-    out=os.path.join(CAT("07"),f"[홍보영상작업지] {sanit(title)}_{today()}.docx"); _savedoc(d,out); _ext_copy(out)
+    out=os.path.join(CAT("07"),f"[홍보영상작업지] {sanit(title)}_{today()}.docx"); out=_savedoc(d,out) or out; _ext_copy(out)
     print(f"✅ 홍보영상 제작 작업지: {out}")
     print(f"   길이 {L}초 · 스토리보드 5장면 · 영상AI 프롬프트 3종 · 무료 편집기 안내 포함")
     print("   → 이 작업지대로 무료 편집기(Clipchamp·Canva·CapCut)로 만드시면 됩니다. ('무료 영상편집·영상 AI 완전 가이드' 카드 참고)")
@@ -1622,7 +1873,7 @@ def sermon_slides(a):
 def song_catalog(a):
     """찬양 작품집(카탈로그) — 작곡 목사님의 전체 자작곡을 발표순으로 정리(유튜브·앨범·저작권). 사역 유산 보존."""
     import json as _j
-    lib=_j.load(open(SONGLIB,encoding='utf-8')) if os.path.exists(SONGLIB) else []
+    lib=_songlib()          # ★유령 곡 제외(2026-08-28 수리)
     comp=[s for s in lib if s.get("작곡가")]
     comp.sort(key=lambda s:(s.get("발표일") or "9999"))
     d=newdoc()
@@ -1641,12 +1892,16 @@ def song_catalog(a):
         if s.get("주제") or s.get("성경"): para(d,f"주제 {s.get('주제','')}  성경 {s.get('성경','')}",10,GRAY,after=1)
         if s.get("유튜브"): para(d,f"🎬 {s['유튜브']}",10,RGBColor(0x1F,0x5C,0x9E),after=1,font=SANS)
         if s.get("저작권"): para(d,f"저작권 등록: {s['저작권']}",9.5,LG,after=1,font=SANS)
-    out=os.path.join(CAT("07"),f"[찬양작품집] {sanit(a.title or CHURCH)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[찬양작품집] {sanit(a.title or CHURCH)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 찬양 작품집 생성: {out} (자작곡 {len(comp)}곡)")
 def songbook(a):
     """찬양집(악보집) 출판 — 선택/전체 곡을 표지·목차·곡별(제목·작곡·key·가사·악보)로 편집·인쇄."""
     import json as _j
-    lib=_j.load(open(SONGLIB,encoding='utf-8')) if os.path.exists(SONGLIB) else []
+    # ★③ 유령 곡 — 이 자리는 ①②④와 ★기전이 다르다(master 판정 부록2).
+    #   `any(w in 제목)` 이라 ★질의어를 주면 유령이 안 걸린다. 유령이 실리는 것은
+    #   ★질의어를 안 주셔서 `sel=lib` 가 될 때다 — 그때 ★찬양집 인쇄물에 제목 빈 곡이 실린다.
+    #   ⇒ 조회 방식을 고쳐서는 안 닫힌다. ★목록 자체를 깨끗하게 받는다.
+    lib=_songlib()
     if a.songs:
         want=[re.sub(r'\s','',x) for x in a.songs.split(";")]
         sel=[s for s in lib if any(w in re.sub(r'\s','',s['제목']) for w in want)]
@@ -1671,14 +1926,16 @@ def songbook(a):
             except Exception: pass
         elif s.get("가사"):
             for ln in s["가사"].split("\n"): para(d,ln,13,GRAY,align=AL.CENTER,after=2)
-    out=os.path.join(CAT("07"),f"[찬양집] {sanit(a.title or '찬양집')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[찬양집] {sanit(a.title or '찬양집')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 찬양집(악보집) 출판: {out} ({len(sel)}곡)")
 def lyrics_screen(a):
     """찬양 가사 스크린 — 예배 프로젝터용 큰글씨 가사 슬라이드(등록곡 가사 사용)."""
     import json as _j
     from docx.enum.section import WD_ORIENT
-    lib=_j.load(open(SONGLIB,encoding='utf-8')) if os.path.exists(SONGLIB) else []
-    byn={re.sub(r'\s','',s['제목']):s for s in lib}
+    # ★① 유령 곡 — `byn` 의 열쇠가 «» 가 되면 아래 `nk in k or k in nk` 에서 ★모든 조회가 유령에 걸린다
+    #   (빈 문자열은 모든 문자열의 부분문자열이다). ⇒ 목록을 거르고 ★열쇠도 한 번 더 막는다.
+    lib=_songlib()
+    byn={k:s for k,s in ((re.sub(r'\s','',s['제목']),s) for s in lib) if k}
     songs=[s.strip() for s in (a.songs or "").split(";") if s.strip()]
     d=Document()
     sec=d.sections[0]; sec.orientation=WD_ORIENT.LANDSCAPE
@@ -1698,8 +1955,10 @@ def lyrics_screen(a):
             d.add_page_break()
             for ln in block.split("\n"):
                 para(d,ln.strip(),40,NAVY,True,AL.CENTER,before=6,after=6,font=SANS)
-    out=os.path.join(CAT("07"),f"[가사스크린] {sanit(a.title or '찬양')}_{today()}.docx"); _savedoc(d,out)
-    print(f"✅ 가사 스크린 생성: {out}"+(f" · 가사없음 {len(miss)}곡: {', '.join(miss)}" if miss else ""))
+    out=os.path.join(CAT("07"),f"[가사스크린] {sanit(a.title or '찬양')}_{today()}.docx"); out=_savedoc(d,out) or out
+    # ★[M2 통합 2026-08-29] 카드 이름이 「찬양 가사 만들기」로 바뀌었으므로 ★결과 문구도 같이 고친다.
+    #   ★파일 이름은 그대로 [가사스크린] 이므로 ★그 이름을 문구에 그대로 남긴다 — 목사님이 파일로 찾으신다.
+    print(f"✅ 찬양 가사 «문서»로 만들었습니다 (파일 이름: [가사스크린]): {out}"+(f" · 가사없음 {len(miss)}곡: {', '.join(miss)}" if miss else ""))
 def worship_roster(a):
     """찬양팀 배정표 — 파트별 배정(인도·건반·기타·베이스·드럼·싱어) + 카톡 리마인드."""
     d=newdoc()
@@ -1713,7 +1972,7 @@ def worship_roster(a):
         t.rows[i].cells[0].width=Cm(3.5); t.rows[i].cells[1].width=Cm(12)
     tborders(t,"BBBBBB",4)
     if a.songs: para(d,"콘티: "+a.songs.replace(";"," · "),11,MAROON,before=8,font=SANS)
-    out=os.path.join(CAT("07"),f"[찬양팀배정] {a.date or today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[찬양팀배정] {a.date or today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 찬양팀 배정표: {out}")
     who=[f"{r} {w}" for r,w in parts if w]
     print(f"  카톡 리마인드 초안: [찬양팀] {a.date or today()} 배정 — "+", ".join(who)+". 예배 30분 전 리허설 부탁드립니다 🙏")
@@ -1881,7 +2140,7 @@ def sermon(a):
         pass
     folder=os.path.join(CAT("09"),sanit(svc)); os.makedirs(folder,exist_ok=True)  # 예배유형별 폴더
     _t=sanit(a.title or '제목없음'); _b=sanit((a.text or '').strip())
-    out=os.path.join(folder,f"[{sanit(svc)}] {_t}"+(f" ({_b})" if _b else "")+f"_{a.date or today()}.docx"); _savedoc(d,out)
+    out=os.path.join(folder,f"[{sanit(svc)}] {_t}"+(f" ({_b})" if _b else "")+f"_{a.date or today()}.docx"); out=_savedoc(d,out) or out
     _ext_copy(out)   # USB·D 외부 이중보관(설정 시). HWP는 별도 '한글 변환' 카드로(웹 지연 방지)
     # 설교 이력 자동 기록 + 같은 본문 과거 설교 경고(반복 방지)
     db=load(); db.setdefault("설교",[])
@@ -1999,7 +2258,7 @@ def bible_plan(a):
             ctext(t.rows[i+1].cells[3],"☐",11,LG,font=SANS,align=AL.CENTER)
         tborders(t)
     para(d,f"· {CHURCH} · 발급일 {today()}",9,LG,align=AL.RIGHT,before=8,font=SANS)
-    out=os.path.join(BIBLECAT(),f"[성경통독표] {typ}{('_'+sanit(dept)) if dept else ''}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(BIBLECAT(),f"[성경통독표] {typ}{('_'+sanit(dept)) if dept else ''}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 성경 통독표({typ}) 생성: {out}  (총 {total}장)")
 
 def _quiz_words(t):
@@ -2018,6 +2277,16 @@ def _blank_word(text, word):
         if tk.strip('.,;:!?"\'()[]')==word:
             toks[i]=tk.replace(word,"( ________ )",1); return " ".join(toks)
     return text.replace(word,"( ________ )",1)
+def _pick_answer(text, cws, used):
+    """빈칸으로 삼을 낱말 고르기.
+       ★예전에는 «가장 긴 낱말» 하나였다(max(cws,key=len)). 한국어에서 그 규칙은 길이가
+         같을 때 앞엣것을 집어 ★문장 첫머리 주어(하나님이·예수께서)를 자주 빈칸으로 만들고,
+         여러 절이 같은 말로 끝나면 ★한 문서에 같은 정답이 두 번 나온다.
+       ★그래서 세 가지를 순서대로 본다: ①이미 쓴 정답이 아닌 것 ②문장 맨 앞 낱말이 아닌 것 ③긴 것.
+       ★피할 수 없으면 그냥 쓴다 — 문제를 못 만드는 것보다 낫다(피하기는 «가급적»이다)."""
+    first=(text.split() or [""])[0].strip('.,;:!?"\'()[]')
+    return sorted(cws, key=lambda w: (w in used, w==first, -len(w)))[0]
+
 def _bible_ver(requested):
     """L 성경본문 2갈래 — 개역개정(한국어) 우선. requested 있으면 그대로. 없으면 개역개정.json 있으면 개역개정, 없으면 (None,None)=주소중심."""
     if requested:
@@ -2026,9 +2295,87 @@ def _bible_ver(requested):
     kp=os.path.join(BIBLEDIR,"개역개정.json")
     if os.path.exists(kp): return ("개역개정", kp)
     return (None, None)
+_HEADING_RE=re.compile(r'^\s*제?\s*\d{1,3}\s*[편장]\s*$')          # 「제 117 편」 「3장」 — 장 제목줄
+# ★«문장이 끝났는가»를 가르는 글자. ★연결어미와 겹치는 글자는 ★일부러 뺐다 —
+#   「여호와는 나의 목자시니」의 «니» 는 ★이어지는 말이고 「하시니라」의 «라» 는 끝나는 말이다.
+#   «니·고·며·여» 를 종결로 치면 ★감긴 줄을 소제목으로 오해해 ★절의 뒷부분을 버린다(실측 확인).
+#   ★버리는 오류가 이어붙이는 오류보다 나쁘다 — 정답이 그 사라진 부분에 있을 수 있다.
+_ENDING=tuple('라다요까야')
+
+def _paste_verses(raw):
+    """목사님이 붙여넣으신 성경 본문을 [(성구, 본문)] 로.
+       ★번호가 붙은 줄을 «절»의 뼈대로 삼는다 — 대한성서공회 «성경읽기»에서 복사하면
+         「제 117 편」 같은 ★장 제목줄과 「여호와를 찬송하라」 같은 ★소제목이 함께 딸려 온다.
+         종전에는 그것들까지 ★전부 절로 삼아 문제에 나왔다(2026-08-29 실측: 주보 안내·회의록도 통과).
+       ★반대 방향 결함도 있었다 — 6자 미만이면 버려서 「할렐루야」 같은 짧은 절이 사라졌다.
+         번호가 붙어 있으면 ★길이를 보지 않는다(번호가 곧 «이건 절이다»라는 증거다).
+       ★돌려주는 둘째 값은 «읽지 않은 줄»이다. 화면이 그것을 ★말해야 한다 — 조용히 버리면
+         목사님은 몇 절이 빠졌는지 모르신 채 문제지를 나눠 주신다."""
+    lines=[l.rstrip() for l in re.split(r'[\r\n]+', raw or "")]
+    lines=[l for l in lines if l.strip()]
+    parsed=[]                                    # (번호있음, ref, txt, 원문줄)
+    for ln in lines:
+        s=re.sub(r'^[\-\*•\s]+','',ln.strip()).replace('　',' ')   # 목록기호·전각공백
+        if not s: continue
+        if _HEADING_RE.match(s): parsed.append((False,'', '', ln)); continue   # 장 제목줄
+        m=re.match(r'^((?:[1-9]?[가-힣]{1,7}\s*)?\d{1,3}\s*[:：]\s*\d{1,3})\s+(.+)$', s)   # 요 3:16 본문
+        if m: parsed.append((True, m.group(1).replace('：',':').strip(), m.group(2).strip(), ln)); continue
+        m=re.match(r'^(\d{1,3})\s*[.)\]]?\s+(.+)$', s)                                     # 16 본문 / 16. 본문
+        if m: parsed.append((True, m.group(1)+'절', m.group(2).strip(), ln)); continue
+        parsed.append((False,'', s, ln))
+    numbered=sum(1 for p in parsed if p[0])
+    items=[]; skipped=[]; merged=[]
+    for has_no, ref, txt, orig in parsed:
+        if has_no:
+            if not any('가'<=c<='힣' for c in txt): skipped.append(orig); continue
+            items.append([ref, txt]); continue
+        # ★번호 없는 줄 — 번호 줄이 2개 이상이면 그 사이의 «맨몸 줄»은 절이 아니다.
+        if numbered>=2:
+            if items and not items[-1][1].rstrip().endswith(_ENDING):
+                items[-1][1]=(items[-1][1]+' '+txt).strip()   # ★앞 절이 안 끝났다 = 줄이 감긴 것 → 이어 붙인다
+                merged.append(orig)
+            else:
+                skipped.append(orig)                          # 제목·소제목 → 읽지 않는다
+            continue
+        # ★번호가 거의 없다 = 본문만 붙여넣으신 경우. 그때는 줄마다 한 절로 본다.
+        if len(txt)<6 or not any('가'<=c<='힣' for c in txt): skipped.append(orig); continue
+        items.append(['', txt])
+    return [(r,t) for r,t in items], skipped, merged
+
 def bible_quiz(a):
-    """📝 성경 퀴즈 — L분기: 개역개정.json 있으면 한국어 본문, 없으면 주소중심(성구주소만·본문은 본인 성경으로). --version web/kjv로 공개영문 명시 가능. 원문복사X·답은 본문에서 검증."""
+    """📝 성경 퀴즈 — ①본문을 붙여넣으시면 그 본문으로 빈칸·사지선다 ②아니면 bible/ 의 한국어 성경 ③둘 다 없으면 주소중심(성구찾아쓰기).
+       ★프로그램은 성경 본문을 담고 있지 않다 — 목사님이 넣으신 본문을 이 컴퓨터 안에서만 읽는다."""
     import random
+    # ★① 붙여넣은 본문이 최우선 — 목사님이 «가지고 계신» 성경으로 문제를 만든다(저작권 부담이 프로그램에 없다)
+    paste=(getattr(a,'verses',None) or "").strip()
+    if paste:
+        picked, bad, merged = _paste_verses(paste)
+        if not picked:
+            print("✗ 붙여넣으신 글에서 성경 본문을 찾지 못했습니다. «성경 본문 붙여넣기» 칸을 다시 봐 주세요.")
+            # ★예시에 실제 성경 본문을 적지 않는다 — 이 프로그램은 성경 본문을 담지 않기로 했다.
+            #   «모양»만 보여 드리고 «내용»은 목사님 성경에서 오게 한다.
+            print("   ▸한 줄에 한 절씩 넣어 주세요. 성구 주소는 적으셔도 되고 안 적으셔도 됩니다:")
+            print("     요 3:16 (그 절의 본문을 목사님 성경에서 그대로 붙여넣으세요)")
+            print("     17 (다음 절의 본문)")
+            if bad: print("   ▸읽지 못한 줄: " + " / ".join(x[:30] for x in bad[:3]))
+            return
+        # ★몇 줄 중 몇 절을 읽었는지 ★숫자로 말한다. 그리고 ★읽지 않은 줄을 그대로 보여 드린다 —
+        #   조용히 버리면 목사님은 빠진 절을 모르신 채 문제지를 나눠 주신다.
+        _총=len([l for l in re.split(r'[\r\n]+', paste) if l.strip()])
+        print(f"📄 붙여넣으신 {_총}줄에서 ★{len(picked)}절을 읽었습니다.")
+        if bad:
+            print(f"   ▸읽지 않은 줄 {len(bad)}개 — 장 제목·소제목이면 정상입니다. 성경 구절인데 빠졌으면 그 줄만 다시 넣어 주세요:")
+            for x in bad[:8]: print(f"     · {x.strip()[:60]}")
+            if len(bad)>8: print(f"     · … 그 밖 {len(bad)-8}줄")
+        if merged:
+            print(f"   ▸{len(merged)}줄은 ★앞 절이 이어진 것으로 보고 앞 절에 붙였습니다(줄이 감긴 경우):")
+            for x in merged[:5]: print(f"     · {x.strip()[:60]}")
+        ver=(getattr(a,'source',None) or "").strip()
+        n=min(_intarg(a.count,10,"문항수"), len(picked))
+        picked=random.sample(picked,n)
+        qlabel=(a.ref or "").strip() or (picked[0][0] or "붙여넣은 본문")
+        return _quiz_build(a, picked, n, ver, qlabel,
+                           ver or "목사님이 넣으신 본문(역본 미표기)", False)
     if not a.ref: print("⚠ 성경 범위를 입력해 주세요. (예: bible-quiz --ref '요한복음 3' --count 10 --type 빈칸)"); return
     ver, path = _bible_ver(a.version); addr_mode=(path is None)
     struct_path = path or os.path.join(BIBLEDIR,"web.json")   # 절 구조는 web에서라도(주소중심)
@@ -2054,42 +2401,118 @@ def bible_quiz(a):
             if t: verses.append((f"{book} {ch}:{v}", t))
     if not verses: print(f"✗ 범위에 본문이 없습니다: {a.ref}"); return
     n=min(_intarg(a.count,10,"문항수"), len(verses)); picked=random.sample(verses,n)
+    srclabel=("성구 주소만 드림(본문은 성경에서 찾아 적으심)" if addr_mode else _vernote(ver))
+    return _quiz_build(a, picked, n, ver, a.ref, srclabel, addr_mode)
+
+# ★역본마다 «출처로 적을 말»을 따로 둔다. 예전에는 개역개정이 아닌 모든 역본에
+#   「(공개역본·저작권 자유)」를 하드코딩했는데, 그러면 개역한글을 넣었을 때 문서가
+#   ★틀린 말을 한다(개역한글은 재산권이 만료된 것이지 «공개역본»이 아니다).
+#   ★성명표시권은 «누구의 무엇인지» 정확히 적을 때 지켜진다.
+_VERNOTE={
+ "개역한글":"대한성서공회 『성경전서 개역한글판』",
+ "개역개정":"대한성서공회 『성경전서 개역개정판』",
+ "web":"World English Bible (영어 공개역본)",
+ "kjv":"King James Version (영어 공개역본)",
+}
+def _vernote(ver):
+    """역본 이름 → 문서에 적을 출처 문구. 모르는 역본이면 ★아무 주장도 덧붙이지 않는다."""
+    v=(ver or "").strip()
+    return _VERNOTE.get(v, _VERNOTE.get(v.lower(), v or "출처 미표기"))
+
+def _quiz_build(a, picked, n, ver, qlabel, srclabel, addr_mode):
+    """문제 생성 + 문서 저장 — 세 갈래(붙여넣은 본문 · bible/ 한국어 성경 · 주소중심)가 함께 쓴다.
+       picked=[(성구, 본문)] · questions=[(문제, 정답, 원문절)]"""
+    import random
     typ=a.type or "빈칸"; level=a.level or ""; dept=a.dept or ""
+    src=(getattr(a,'source',None) or "").strip()
+    if src: srclabel=src        # ★목사님이 역본명을 적으시면 그것이 출처다(성명표시권 이행 자리)
     questions=[]
     if addr_mode:   # 주소중심 — 본문 미포함(저작권), 성구를 본인 성경에서 찾아 쓰기
+        # ★고르신 유형을 바꿔 드릴 때는 반드시 ★화면에 말한다. 조용히 바꾸면 목사님은 ✅ 한 줄만
+        #   보시고 «되었다»고 아시다가, 주일학교에서 문제지를 펴신 뒤에야 다른 문제인 것을 아신다.
+        if not typ.startswith("성구"):
+            print(f"⚠ 고르신 «{typ}» 문제로는 만들지 못했습니다 — 이 프로그램에는 성경 본문이 들어 있지 않습니다.")
+            print("   대신 «성구 찾아쓰기»(성구 주소만 드리고 성경에서 찾아 적게 하는 문제)로 만들어 드렸습니다.")
+            # ★막다른 골목으로 두지 않는다 — 오늘 바로 되는 길을 함께 알려 드린다.
+            #   ★카드 설명과 ★똑같은 말로 쓴다. 두 곳이 다른 말을 하면 목사님이 어느 쪽을 믿어야 할지 모르신다.
+            print(f"   ▸★«{typ}»로 원하시면 쓰시는 성경 본문을 «성경 본문 붙여넣기» 칸에 붙여넣고 다시 실행해 주세요.")
+            print("     ★대한성서공회 «성경읽기»(bskorea.or.kr)에서 보실 수 있습니다.")
+            print("     (한 줄에 한 절 · 앞에 «요 3:16» 처럼 성구를 적으셔도 되고 안 적으셔도 됩니다.)")
         typ="성구찾아쓰기"
-        for ref,_ in picked: questions.append((f"{ref} 말씀을 성경에서 찾아 아래에 적으세요.", ref))
-        srclabel="주소중심(본문 미포함 · 본인 성경으로 채움)"
+        for ref,_ in picked: questions.append((f"{ref} 말씀을 성경에서 찾아 아래에 적으세요.", ref, ""))
     else:
+        # ★영어 본문으로 나가는 것도 말없이 드리지 않는다 — 파일을 여신 뒤에 아시면 늦다.
+        if (ver or "").lower() in ("web","kjv"):
+            print(f"⚠ 문제 본문이 ★영어로 나옵니다 — «{ver}»는 영어 공개역본입니다.")
+            print("   한국어로 원하시면 쓰시는 성경 본문을 «성경 본문 붙여넣기» 칸에 붙여넣어 주세요.")
+            print("   ★대한성서공회 «성경읽기»(bskorea.or.kr)에서 보실 수 있습니다.")
         pool=list({w for _,t in picked for w in _quiz_words(t)})
+        used=set(); usedopt={}; tight=False
         for ref,text in picked:
             cws=_quiz_words(text)
+            # ★성구를 안 적고 본문만 붙여넣으실 수 있다 — 그때 «( )» 라는 빈 괄호를 찍지 않는다.
+            tag=f"  ({ref})" if ref else ""
             if typ.startswith("성구") or not cws:
-                questions.append((text, ref)); continue
-            word=max(cws,key=len); blanked=_blank_word(text,word)
+                questions.append((text, ref or text[:20], text)); continue
+            word=_pick_answer(text, cws, used); used.add(word); blanked=_blank_word(text,word)
             if typ.startswith("사지") or typ.startswith("4"):
-                others=[w for w in pool if w.lower()!=word.lower()]; random.shuffle(others)
-                opts=[word]+others[:3]; random.shuffle(opts); lab="①②③④"
+                # ★그 문장 안에 이미 보이는 낱말은 오답으로 쓰지 않는다 —
+                #   「내게 부족함이 ( ___ )」 옆에 보기로 «부족함이» 가 있으면 ★빈칸을 뚫은 의미가 없다.
+                inverse={w.lower() for w in cws}
+                others=[w for w in pool if w.lower()!=word.lower() and w.lower() not in inverse]
+                if len(others)<3:
+                    # ★폴백 — 후보가 모자라면 그때만 허용한다(문제를 못 만드는 것보다 낫다).
+                    #   ★대신 왜 겹치는지 화면이 말한다. 조용히 겹치게 두지 않는다.
+                    others=[w for w in pool if w.lower()!=word.lower()]
+                    tight=True
+                # ★길이가 비슷한 오답을 고른다 — 정답만 유독 길면 읽지 않고도 답이 보인다.
+                #   ★단 «가장 가까운 3개»를 그대로 쓰면 문제마다 ★같은 보기 묶음이 반복된다
+                #     (길이차 정렬이 결정론이라 매번 같은 낱말을 집는다 — 실제로 그렇게 나왔다).
+                #   ⇒ 길이가 가까운 ★후보 묶음을 넉넉히 잡은 뒤 그 안에서 무작위로 3개를 뽑는다.
+                random.shuffle(others); others.sort(key=lambda w: abs(len(w)-len(word)))
+                #   ★그래도 문제마다 같은 낱말이 다시 나온다 — 길이가 비슷한 낱말은 몇 개 안 되기 때문이다.
+                #     ⇒ 이 문서에서 ★덜 쓴 낱말을 먼저 쓴다(동률은 무작위 — 먼저 섞어 두었다).
+                cand=others[:9]; random.shuffle(cand); cand.sort(key=lambda w: usedopt.get(w,0))
+                take=cand[:3]
+                for _w in take: usedopt[_w]=usedopt.get(_w,0)+1
+                opts=[word]+take; random.shuffle(opts); lab="①②③④"
                 qtext=blanked+"\n    "+"   ".join(f"{lab[i]} {o}" for i,o in enumerate(opts))
-                questions.append((qtext, f"{lab[opts.index(word)]} {word}  ({ref})"))
+                questions.append((qtext, f"{lab[opts.index(word)]} {word}{tag}", text))
             else:
-                questions.append((blanked, f"{word}  ({ref})"))
-        srclabel=f"{ver}" + (" (개역개정 한국어)" if ver=="개역개정" else " (공개역본·저작권 자유)")
+                questions.append((blanked, f"{word}{tag}", text))
+        # ★절이 적으면 오답을 그 안에서 뽑을 수밖에 없다 — 말없이 두지 않는다.
+        #   ★«겹친다»(폴백이 실제로 돌았다)와 «비슷해진다»(그냥 절이 적다)를 갈라서 말한다.
+        if (typ.startswith("사지") or typ.startswith("4")) and (tight or len(picked)<5):
+            _how=("본문을 5절 이상 넣어 주세요" if (getattr(a,'verses',None) or "").strip()
+                  else "범위를 조금 넓히시거나 문항 수를 늘려 주세요")   # ★길에 맞는 말을 해야 안내가 된다
+            _what=("절이 적어 보기가 문제 문장 안 낱말과 겹칩니다" if tight
+                   else f"지금은 {len(picked)}절 안에서 오답을 뽑고 있어 보기가 서로 비슷해집니다")
+            print(f"💡 {_what} — 보기를 더 다양하게 하시려면 {_how}.")
     d=newdoc()
     para(d,CHURCH,11,GOLD,True,AL.CENTER,after=0,font=SANS)
     para(d,"성경 퀴즈",22,NAVY,True,AL.CENTER,before=4,after=2,font=SANS)
-    meta=" · ".join(x for x in [dept,(f"난이도 {level}" if level else ""),f"범위 {a.ref}",(ver or "주소중심"),f"{n}문항",typ] if x)
+    # ★머리글이 «주소중심»이라고 말해도 되는 것은 정말 주소중심일 때뿐이다 —
+    #   붙여넣으신 본문으로 만들었는데 «주소중심»이라 찍히면 문서가 거짓말을 한다.
+    vermeta = ver or ("성구 주소만" if addr_mode else "붙여넣으신 본문")
+    meta=" · ".join(x for x in [dept,(f"난이도 {level}" if level else ""),f"범위 {qlabel}",vermeta,f"{n}문항",typ] if x)
     para(d,meta,10,MAROON,True,AL.CENTER,after=8,font=SANS); hr(d,"1F5C9E",12)
     para(d,"■ 문제",13,NAVY,True,after=4,font=SANS)
-    for i,(q,_) in enumerate(questions,1):
+    for i,(q,_,_o) in enumerate(questions,1):
         para(d,f"{i}. {q}",11,GRAY,after=2,font=SERIF)
         para(d,"   답: ________________________",10,LG,after=7,font=SANS)
     d.add_page_break()
     para(d,"■ 정답지",16,MAROON,True,AL.CENTER,after=6,font=SANS); hr(d,"8B2E2E",10)
-    for i,(_,ans) in enumerate(questions,1): para(d,f"{i}. {ans}",11,NAVY,after=3,font=SERIF)
+    # ★정답 옆에 ★원문 절을 그대로 싣는다 — 본문을 «훼손»한 것이 아니라 «원문을 싣고 그 위에 문제를 낸 것»이
+    #   되게 하는 자리다(동일성유지권 처방). 채점하시는 분께도 원문이 함께 보여 편하다.
+    for i,(_,ans,orig) in enumerate(questions,1):
+        para(d,f"{i}. {ans}",11,NAVY,after=1,font=SERIF)
+        if orig: para(d,f"    원문: {orig}",9,LG,after=4,font=SERIF)
     para(d,f"· {CHURCH} · {today()} · 본문 출처: {srclabel}",9,LG,align=AL.RIGHT,before=8,font=SANS)
-    out=os.path.join(BIBLECAT(),f"[성경퀴즈] {sanit(a.ref)}_{typ}_{today()}.docx"); _savedoc(d,out)
-    print(f"✅ 성경 퀴즈 생성({n}문항·{typ}·{ver or '주소중심'}): {out}")
+    # ★어느 성경으로 만들었는지 ★언제나 말한다 — A(목사님 본문)와 B(들어 있는 역본)를 함께 쓰면
+    #   목사님은 «이번 것이 어느 성경이었나»를 아셔야 한다. 이 한 줄이 두 길을 섞어 쓰는 안전장치다.
+    print(f"📖 이번 문제는 «{srclabel}»(으)로 만들었습니다.")
+    out=os.path.join(BIBLECAT(),f"[성경퀴즈] {sanit(qlabel)}_{typ}_{today()}.docx"); out=_savedoc(d,out) or out
+    print(f"✅ 성경 퀴즈 생성({n}문항·{typ}·{srclabel}): {out}")
 
 def memory_verse(a):
     """💳 성경 암송표·지갑카드 — 성구주소 목록(--refs '요한복음 3:16; 로마서 8:28')으로 암송표+지갑용 카드 생성. 본문은 공개역본(원문 저작권 회피)·세트명은 라벨(저작권 큐레이션 목록 내장 안 함)."""
@@ -2134,7 +2557,7 @@ def memory_verse(a):
     tborders(ct,"888888",6)
     _src = "주소중심(본문은 본인 성경으로)" if addr_mode else ("개역개정(한국어)" if ver=="개역개정" else f"{ver}(공개역본·저작권 자유)")
     para(d,f"· {CHURCH} · {today()} · 본문 출처: {_src}",9,LG,align=AL.RIGHT,before=8,font=SANS)
-    out=os.path.join(BIBLECAT(),f"[성경암송표] {sanit(setname)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(BIBLECAT(),f"[성경암송표] {sanit(setname)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 성경 암송표·지갑카드 생성({len(items)}구절·{setname}·{verlabel}): {out}")
 
 def kakao(a):
@@ -2149,7 +2572,7 @@ def kakao(a):
                 msg=f"{m['이름']} {m['직분']}님, 생일을 진심으로 축하드립니다! 🎂\n{PASTOR}와 {CHURCH} 온 성도가 늘 축복하며 기도합니다. 샬롬 🙏"
                 blocks.append((m['이름'],m['연락처'],m['소속셀'],msg))
     elif mode=="devotion":
-        title="오늘의 묵상 발송"; msg=a.text or f"[{CHURCH} 오늘의 묵상] (묵상 내용)"
+        title="오늘의 묵상 카톡 초안"; msg=a.text or f"[{CHURCH} 오늘의 묵상] (묵상 내용)"
         for m in db["교인"]: blocks.append((m['이름'],m['연락처'],m['소속셀'],msg))
     else:
         title=a.title or "공지"; msg=a.text or ""
@@ -2165,7 +2588,14 @@ def kakao(a):
         for name,tel,_,msg in bs:
             lines.append(f"▼ {name} ({tel})"); lines.append(msg); lines.append("")
     folder=CAT("07")
-    out=os.path.join(folder,f"[카톡발송] {sanit(title)}_{today()}.txt")
+    # ★★T-1 (master 규격 v2 · 2026-08-28) — 「발송」은 ★거짓이다. 이 프로그램은 카톡을 ★보내지 않는다.
+    #   바로 위 독스트링이 스스로 그렇게 말하고 있었다 — 축자:
+    #     「개인 카톡 ★자동발송은 카카오 정책상 ★불가 → 생성→붙여넣기가 비용0 실용안」
+    #   그런데 ★파일 이름에는 「[카톡발송]」이라고 적혀 나갔다. 목사님은 파일 이름을 보시고
+    #   ★«보냈다»로 읽으신다. ⇒ 만드는 것은 ★붙여넣기 초안이므로 이름도 그렇게 적는다.
+    # ★생성물이 아니라 ★생성기를 고친다 — 그래야 ★다음에 만드는 것부터 바뀐다
+    #   [[edit-the-generator-not-the-artifact]]
+    out=os.path.join(folder,f"[카톡초안] {sanit(title)}_{today()}.txt")
     open(out,'w',encoding='utf-8').write("\n".join(lines))
     print(f"✅ 카톡에 붙여넣기 목록: {out}  ({len(blocks)}명)")
     print("  → 파일 열어 블록별로 복사→카톡 붙여넣기(비용0). 완전자동 원하면 유료 알림톡 채널 필요.")
@@ -2173,6 +2603,56 @@ def kakao(a):
 def _days_since(dstr):
     try: return (datetime.date.today()-datetime.date.fromisoformat(dstr)).days
     except Exception: return None
+
+def _too_new(m, days):
+    """★등록하신 지 `days` 일이 안 된 분인가 — «오래 못 뵌 분»·«장기결석» 판정 대상이 아니다.
+
+       ★왜 (2026-08-28 · 전수 실기에서 나온 결함 · master 판정 C):
+         등록 이전 기간은 «안 나오심»이 아니라 ★«해당 없음»이다.
+         그 주에 교회는 출석을 찍었지만 ★그분은 아직 우리 교인이 아니셨다.
+         ⑤ 체크판이 스스로 선언한 «없는 결석을 지어내면 심방 판단이 틀어진다»가
+         ★바로 이 자리에도 적용된다.
+         (안 그러면 처음 설치하고 교인 200명을 넣으신 목사님은 ★첫날 200명 전원이
+          «장기결석자·돌봄 필요»로 뜬다 — 그 카드가 첫날부터 쓸모를 잃는다.)
+       ★등록일이 비어 있으면 하한을 ★적용하지 않는다 — 모르는 것을 «오늘 등록»으로 접지 않는다.
+         (0 으로 접는 함정은 이 파일 :414-415 가 이미 경고하고 있다.)"""
+    rd=(m.get("등록일") or "").strip()
+    if not rd: return False
+    ds=_days_since(rd)
+    return ds is not None and ds < days
+
+def _last_visit(m):
+    """가장 ★최근 심방 날짜 — 없으면 None.
+
+       ★심방이력은 이 프로그램 어디에서도 ★정렬되지 않는다. 그래서 «최근»은
+         목록의 마지막 원소가 아니라 ★날짜 최대값이다.
+       ★지금 화면의 심방 카드에는 날짜 칸이 없어 과거 날짜가 들어올 길이 없다(2026-08-28 실측).
+         그러나 «밀린 심방을 소급 입력»은 목회 현장에서 흔한 요청이라
+         ★그 칸이 열리는 순간 [-1] 은 조용히 틀린 답을 낸다. 미리 잠가 둔다."""
+    ds=[(v.get("날짜") or "") for v in (m.get("심방이력") or []) if v.get("날짜")]
+    return max(ds) if ds else None
+
+def _is_newfamily(m):
+    """이분이 ★새가족인가 — 판정하는 자리는 ★여기 하나뿐이다.
+
+       ★왜 함수로 모았나 (2026-08-27 · 작은 교회 목사님 실사용 피드백에서 온 수리):
+         종전에는 한 프로그램 안에 새가족을 재는 자가 ★둘이었다.
+           ㉮ 유형·상태가 «새가족»인가   ← 맞는 자
+           ㉯ 등록일이 90일 이내인가      ← ★틀린 자
+         ㉯ 때문에 ★처음 설치하고 기존 교인을 넣으면 ★전원이 새가족으로 표시됐다.
+         그날 넣으셨으니 등록일이 전부 오늘이기 때문이다. 30년 다니신 장로님도 새가족이 됐다.
+
+       ★뿌리는 «등록일»의 뜻을 헷갈린 것이다 — 그 날짜는 ★교회에 등록하신 날이 아니라
+         ★이 프로그램에 입력한 날이다. 날짜로 사람의 신분을 ★추정하지 않는다. 적힌 대로 읽는다.
+
+       ★자료는 이미 갈라져 있었다 — 고칠 것은 «등록하는 법»이 아니라 «세는 자»다:
+           member_add / member_import → 상태 «재적»  (기존 성도)
+           newfamily_add             → 유형·상태 «새가족» + 정착여부 «진행»
+         그러니 이 한 줄이면 목사님이 ★어느 카드로 넣으셨는지를 그대로 읽는 것이 된다.
+
+       ★상태·유형 둘 다 보는 이유: newfamily_add 는 둘 다 적지만, 옛 자료나 손으로 고친 자료에는
+         한쪽만 있을 수 있다. 둘 중 하나라도 «새가족»이면 새가족으로 본다."""
+    return (m.get("유형")=="새가족") or (m.get("상태")=="새가족")
 _MUKSANG_THEMES={
  "사랑":{"해설":"하나님의 사랑은 조건이 없습니다. 우리가 사랑스러워서가 아니라, 하나님이 사랑이시기에 먼저 사랑하셨습니다. 그 사랑을 받은 사람은 이제 그 사랑으로 이웃을 품게 됩니다.",
         "질문":["이 말씀에서 하나님의 사랑은 어떻게 드러납니까?","내가 조건 없이 사랑해야 할 사람은 누구입니까?","오늘 그 사랑을 어떤 말과 행동으로 표현할 수 있을까요?"]},
@@ -2230,14 +2710,106 @@ def _muksang_pick(theme, blob, datestr=None):
     if key:
         th=_MUKSANG_THEMES[key]; return key, th["해설"], list(th["질문"])
     return None, "", list(_MUKSANG_GENERAL)
+def _muksang_font(size):
+    """말씀 카드용 한글 글꼴 — 맑은고딕을 ★하나만 박아 두지 않는다.
+
+       ★왜: 그 글꼴이 없는 컴퓨터에서는 글자가 ★네모(두부)로 나온다. 그러면 «그림은 나왔는데
+         읽을 수 없는» 반쪽 결과가 되고, rc 는 여전히 0이라 아무도 모른다.
+       ⇒ 후보를 차례로 내려가고, ★하나도 없으면 None 을 돌려줘 위에서 정직하게 알리게 한다."""
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    for p in (r"C:\Windows\Fonts\malgun.ttf",   r"C:\Windows\Fonts\malgunsl.ttf",
+              r"C:\Windows\Fonts\NanumGothic.ttf", r"C:\Windows\Fonts\NGULIM.TTF",
+              r"C:\Windows\Fonts\gulim.ttc",    r"C:\Windows\Fonts\batang.ttc"):
+        if os.path.exists(p):
+            try: return ImageFont.truetype(p, size)
+            except Exception: pass
+    return None
+
+
+def _muksang_image_pil(ref, phrase, church, outpath, pal, bgpick, W=1080, H=1080):
+    """말씀 카드를 ★Pillow(PIL)로 그린다 — 배포판 파이썬에 ★이미 실려 있는 부품이다.
+
+       ★2026-08-28 수리(master 판정 B): 종전에는 ffmpeg 로만 그렸는데 ffmpeg 는 배포판에
+         실려 나가지 않는다(실측 0건). ⇒ 카드가 약속한 «이쁜 말씀카드 그림»이 목사님
+         컴퓨터에서는 ★영영 안 나왔다. ★문장을 내리는 대신 ★수단을 바꾼다.
+
+       ★함정 셋을 미리 막는다(설교 슬라이드에서 이미 밟아 본 자리):
+         ①알파 무시 — 반투명 막은 ★따로 RGBA 레이어에 그려 alpha_composite 로 합친다.
+                       (그냥 rectangle 에 알파색을 주면 반투명이 안 먹고 ★불투명하게 덮인다.)
+         ②글자 넘침 — 가로폭을 ★재서 안 들어가면 글자 크기를 줄인다.
+         ③아래 잘림 — 교회명 밑선을 H-40 안쪽으로 잡는다."""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        return None
+    try:
+        if bgpick and os.path.exists(bgpick):
+            im = Image.open(bgpick).convert("RGB")
+            r = max(W / im.width, H / im.height)              # 짧은 변을 맞춰 키우고
+            im = im.resize((max(1, int(im.width * r + .5)), max(1, int(im.height * r + .5))), Image.LANCZOS)
+            l = (im.width - W) // 2; t = (im.height - H) // 2  # 가운데를 잘라 정사각으로
+            im = im.crop((l, t, l + W, t + H)).convert("RGBA")
+            im = Image.alpha_composite(im, Image.new("RGBA", (W, H), (0, 0, 0, 107)))   # 검은 막 42%
+            c_ref, c_ph, c_ch, c_line, 테 = ((243,225,176,255), (255,255,255,255),
+                                             (243,217,160,255), (243,225,176,255), (255,255,255,140))
+            그림자 = True
+        else:
+            c0 = tuple(int(pal[0][i:i+2], 16) for i in (0, 2, 4))
+            c1 = tuple(int(pal[1][i:i+2], 16) for i in (0, 2, 4))
+            g = Image.new("RGB", (1, H)); gp = g.load()        # ★1픽셀 폭으로 만들고 늘린다
+            for y in range(H):                                 #   (1080×1080 을 한 점씩 칠하면 느리다)
+                f = y / max(1, H - 1)
+                gp[0, y] = tuple(int(c0[i] + (c1[i] - c0[i]) * f) for i in range(3))
+            im = g.resize((W, H), Image.BILINEAR).convert("RGBA")
+            패 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            ImageDraw.Draw(패).rectangle([90, 90, W - 90, H - 90], fill=(255, 255, 255, 122))  # 흰 패널 48%
+            im = Image.alpha_composite(im, 패)
+            c_ref, c_ph, c_ch, c_line, 테 = ((154,106,46,255), (36,50,68,255),
+                                             (154,106,46,255), (185,138,60,255), (185,138,60,140))
+            그림자 = False
+
+        d = ImageDraw.Draw(im, "RGBA")
+        d.rectangle([66, 66, W - 66, H - 66], outline=테, width=2)
+
+        여백 = 130                                              # 좌우 여백(글자가 프레임에 닿지 않게)
+        def 한줄(txt, y, size, color):
+            """가운데 정렬로 한 줄 — ★안 들어가면 글자를 줄인다. 그린 높이를 돌려준다."""
+            txt = str(txt or "").strip()
+            if not txt: return 0
+            f = _muksang_font(size)
+            if f is None: raise RuntimeError("한글 글꼴 없음")
+            while size > 18:
+                if d.textbbox((0, 0), txt, font=f)[2] <= W - 여백 * 2: break
+                size = int(size * 0.92); f = _muksang_font(size)
+            b = d.textbbox((0, 0), txt, font=f)
+            x = (W - (b[2] - b[0])) // 2 - b[0]
+            if 그림자: d.text((x + 2, y + 2), txt, font=f, fill=(0, 0, 0, 205))
+            d.text((x, y), txt, font=f, fill=color)
+            return b[3] - b[1]
+
+        한줄(ref or "오늘의 말씀", 270, 48, c_ref)
+        d.rectangle([W // 2 - 70, 352, W // 2 + 70, 354], fill=c_line)      # 성구 아래 강조선
+
+        줄들 = [x for x in _vwrap(str(phrase or "오늘도 은혜 안에서"), 14).split("\n") if x.strip()]
+        줄높이 = 94
+        y = (H - 줄높이 * len(줄들)) // 2 + 30
+        for ln in 줄들:
+            한줄(ln, y, 70, c_ph); y += 줄높이
+
+        한줄(church or "", H - 175, 36, c_ch)                                # ★밑선 H-40 안쪽
+
+        im.convert("RGB").save(outpath, "PNG")
+        return outpath if os.path.exists(outpath) else None
+    except Exception:
+        return None
+
+
 def _muksang_image(ref, phrase, church, outpath, mon=None):
     """말씀 카드 이미지(png) — 따뜻한 계절 그라데이션 배경 + 성구 주소 + 짧은 문구. 저작권 안전(본문 전문 없음)."""
     import subprocess, shutil, datetime
-    ff=None
-    for c in (os.path.join(BASE,"ffmpeg.exe"), os.path.join(BASE,"_bin","ffmpeg.exe")):
-        if os.path.exists(c): ff=c; break
-    if not ff: ff=shutil.which("ffmpeg")
-    if not ff: return None
     W=H=1080; FONT=r"C:/Windows/Fonts/malgun.ttf".replace(':',r'\:')
     # 배경 이미지 폴더 준비(목사님이 교회 사진·풍경·무료 이미지를 넣으면 그 위에 성구를 얹음)
     bgdir=os.path.join(BASE,"_내자료","묵상배경"); os.makedirs(bgdir,exist_ok=True)
@@ -2250,6 +2822,22 @@ def _muksang_image(ref, phrase, church, outpath, mon=None):
             "· 비워 두시면 따뜻한 계절 그라데이션 배경이 자동으로 쓰입니다.")
     bgs=[os.path.join(bgdir,f) for f in sorted(os.listdir(bgdir))
          if '.' in f and f.lower().rsplit('.',1)[-1] in ('jpg','jpeg','png','webp')] if os.path.isdir(bgdir) else []
+    # ── 계절 색 (배경 사진이 없을 때) — ★한 곳에서만 정한다(PIL·ffmpeg 두 길이 같은 색을 쓰게) ──
+    m=mon or datetime.date.today().month
+    pal={3:("FCE3EC","F6C8DE"),4:("FCE3EC","F6C8DE"),5:("E9F6DE","C7E9B0"),6:("DCEEFB","BBD8F5"),7:("DCEEFB","BBD8F5"),8:("DCEEFB","BBD8F5"),
+         9:("FBEAD0","F4D4A6"),10:("FBEAD0","F4D4A6"),11:("FBEAD0","F4D4A6"),12:("EAF0FA","D2E0F2"),1:("EAF0FA","D2E0F2"),2:("EAF0FA","D2E0F2")}.get(m,("FBEAD0","F4D4A6"))
+    _bg=bgs[datetime.date.today().toordinal()%len(bgs)] if bgs else None
+
+    # ★①먼저 PIL 로 그린다 — 배포판 파이썬에 이미 실려 있어 ★목사님 컴퓨터에서 실제로 된다.
+    _p=_muksang_image_pil(ref,phrase,church,outpath,pal,_bg,W,H)
+    if _p: return _p
+
+    # ★②PIL 이 없거나 실패하면 ffmpeg 로 (있는 환경에서는 여전히 쓴다 — 길을 지우지 않는다)
+    ff=None
+    for c in (os.path.join(BASE,"ffmpeg.exe"), os.path.join(BASE,"_bin","ffmpeg.exe")):
+        if os.path.exists(c): ff=c; break
+    if not ff: ff=shutil.which("ffmpeg")
+    if not ff: return None
     import tempfile as _tf
     tmp=_tf.mkdtemp()
     open(os.path.join(tmp,"ref.txt"),'w',encoding='utf-8').write(str(ref or "오늘의 말씀"))
@@ -2266,10 +2854,7 @@ def _muksang_image(ref, phrase, church, outpath, mon=None):
             +(AL%"0xF3E1B0")+","
             f"drawtext=fontfile='{FONT}':textfile='ph.txt':fontcolor=white:fontsize=70:x=(w-tw)/2:y=(h-th)/2+30:line_spacing=24:shadowcolor=black@0.85:shadowx=3:shadowy=3,"
             f"drawtext=fontfile='{FONT}':textfile='ch.txt':fontcolor=0xF3D9A0:fontsize=36:x=(w-tw)/2:y=h-175:shadowcolor=black@0.8:shadowx=2:shadowy=2")
-    else:     # 계절 그라데이션 + 은은한 패널 + 금색 프레임 + 어두운 글자
-        m=mon or datetime.date.today().month
-        pal={3:("FCE3EC","F6C8DE"),4:("FCE3EC","F6C8DE"),5:("E9F6DE","C7E9B0"),6:("DCEEFB","BBD8F5"),7:("DCEEFB","BBD8F5"),8:("DCEEFB","BBD8F5"),
-             9:("FBEAD0","F4D4A6"),10:("FBEAD0","F4D4A6"),11:("FBEAD0","F4D4A6"),12:("EAF0FA","D2E0F2"),1:("EAF0FA","D2E0F2"),2:("EAF0FA","D2E0F2")}.get(m,("FBEAD0","F4D4A6"))
+    else:     # 계절 그라데이션 + 은은한 패널 + 금색 프레임 + 어두운 글자 (색은 위에서 정한 pal 을 쓴다)
         inputs=['-f','lavfi','-i',f'gradients=s={W}x{H}:c0=0x{pal[0]}:c1=0x{pal[1]}:d=1']
         vf=(f"drawbox=x=90:y=90:w={W-180}:h={H-180}:color=white@0.48:t=fill,"
             f"drawbox=x=66:y=66:w={W-132}:h={H-132}:color=0xB98A3C@0.55:t=2,"
@@ -2280,7 +2865,7 @@ def _muksang_image(ref, phrase, church, outpath, mon=None):
     r=subprocess.run([ff,'-y']+inputs+['-vf',vf,'-frames:v','1',outpath],cwd=tmp,capture_output=True,text=True)
     return outpath if (r.returncode==0 and os.path.exists(outpath)) else None
 def devotion(a):
-    """오늘의 묵상 말씀 — 성도 발송용 초안(제목·본문·묵상·기도·문자). 내용을 채워 발송."""
+    """오늘의 묵상 말씀 — 성도에게 보내실 초안(제목·본문·묵상·기도·문자). 채우시면 ★보내실 글이 됩니다."""
     d=newdoc()
     # ★저작권 안전: 성경 본문은 목사님이 직접 입력(프로그램에 성경 미내장). 주제로 해설·질문을 자동 제안.
     _blob=" ".join([getattr(a,'title','') or "", a.text or "", getattr(a,'body','') or "", getattr(a,'verse','') or ""])
@@ -2327,13 +2912,13 @@ def devotion(a):
             (f"\n[기도] {(a.pray or '').strip()}" if (a.pray or '').strip() else ""),
             "\n오늘도 말씀 안에서 은혜 충만하세요! 🙏"]
     send_msg="\n".join(p for p in _parts if p)
-    para(d,"■ 성도 발송문 (저작권 안전형: 본문 전문 대신 성구주소 + 창작 묵상)",10.5,MAROON,True,before=6,after=3,font=SANS)
+    para(d,"■ 성도에게 보내실 글 (저작권 안전형: 본문 전문 대신 성구주소 + 창작 묵상)",10.5,MAROON,True,before=6,after=3,font=SANS)
     para(d,send_msg,10.5,GRAY)
     para(d,"※ 성도들에게 보내는 법: 함께 만들어지는 '카톡에 붙여넣기 목록'(메모장) 파일을 열어 → 성도별 내용을 복사 → 카톡에 붙여넣어 보내시면 됩니다(무료·비용0).",8.5,LG,before=3,font=SANS)
     para(d,"※ 개역개정·NIV 본문은 저작권 보호 대상 → 전문 복제 배포하지 않고 성구 주소만 안내. 묵상·적용·기도문은 목사님이 새로 쓰신 창작 글이라 저작권 걱정 없이 성도들께 보내실 수 있습니다.",8.5,LG,before=4,font=SANS)
     folder=CAT("09")
     _t=sanit(a.title or '묵상'); _b=sanit((a.text or '').strip())
-    out=os.path.join(folder,f"[오늘의묵상] {_t}"+(f" ({_b})" if _b else "")+f"_{a.date or today()}.docx"); _savedoc(d,out)
+    out=os.path.join(folder,f"[오늘의묵상] {_t}"+(f" ({_b})" if _b else "")+f"_{a.date or today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 오늘의 묵상 생성: {out}")
     # ── 말씀 카드 이미지(png) — 성구 주소 + 짧은 문구 + 계절 배경(저작권 안전: 본문 전문 없음) ──
     try:
@@ -2345,7 +2930,12 @@ def devotion(a):
             print(f"✅ 묵상 카드 이미지: {_img}")
             print(f"__OPENFILE__{_img}")
         else:
-            print("   (묵상 카드 이미지는 영상 엔진(ffmpeg)이 있는 환경에서 함께 만들어집니다.)")
+            # ★각주로 흘리지 않는다 — 「홍보영상」 카드(:1635)와 ★같은 문체로 사실대로 알린다.
+            #   종전 문장은 「있는 환경에서 만들어집니다」였다. 목사님은 그것을
+            #   «내 환경엔 있겠지»로 읽으시고, ★없다는 사실은 끝내 모르셨다.
+            print("ℹ 말씀 카드 그림은 이번에 만들지 못했습니다 — 그림을 그리는 부품이 이 파이썬에 없습니다.")
+            print("   1) 바탕화면의 '교회행정 시작' 아이콘으로 켜 주세요 — 프로그램이 준비한 파이썬에는 그 부품이 들어 있습니다.")
+            print("   2) 그래도 안 되면 알려 주십시오. (묵상 문서·카톡 초안은 위에 정상으로 만들어졌습니다.)")
     except Exception as _e: print(f"   (묵상 카드 이미지 건너뜀: {str(_e)[:60]})")
     print("─"*34)
     print("※ 배경 그림을 바꾸려면: _내자료 › 묵상배경 폴더에 교회·풍경 사진을 넣으세요(없으면 계절 배경 자동).")
@@ -2365,7 +2955,8 @@ def devotion(a):
                     L.append(f"───── [{cell}] {len(ms)}명 ─────")
                     for m in ms:
                         L.append(f"▼ {m['이름']} ({m.get('연락처','') or ''})"); L.append(send_msg); L.append("")
-                kit=os.path.join(CAT("07"),f"[오늘의묵상_카톡발송] {_t}_{a.date or today()}.txt")
+                # ★T-1 — 여기도 「발송」이라 적고 있었다(생성기). 만드는 것은 ★붙여넣기 초안이다
+                kit=os.path.join(CAT("07"),f"[오늘의묵상_카톡초안] {_t}_{a.date or today()}.txt")
                 open(kit,'w',encoding='utf-8').write("\n".join(L)); _openfile(kit)
                 print(f"✅ 교인 카톡에 붙여넣기 목록: {kit}  ({len(mem)}명) — 열어서 성도별 카톡 붙여넣기(무료)")
             else:
@@ -2376,9 +2967,12 @@ def devotion(a):
         print("   (묵상 내용을 채우시면, 교인에게 보낼 카톡에 붙여넣기 목록이 함께 만들어집니다)")
 def care(a):
     """돌봄 필요 성도 감지 — 심방한 지 오래된 순 (벤치마크 #2)"""
-    db=load(); days=_intarg(a.days, 90, "일수"); rows=[]
+    db=load(); days=_intarg(a.days, 90, "일수"); rows=[]; 신규=[]
     for m in db["교인"]:
-        last=m["심방이력"][-1]["날짜"] if m["심방이력"] else None
+        # ★등록하신 지 얼마 안 된 분은 «오래 못 뵌 분»이 아니다 — 등록 전 기간을 세지 않는다.
+        #   조용히 빼지 않고 아래에서 ★몇 분인지 알려 드린다.
+        if _too_new(m, days): 신규.append(m['이름'] or '(이름 미입력)'); continue
+        last=_last_visit(m)          # ★심방이력은 정렬되지 않는다 — [-1] 이 아니라 최대값
         ds=_days_since(last) if last else 9999
         if ds>=days: rows.append((ds,m,last))
     rows.sort(key=lambda t:t[0],reverse=True)
@@ -2386,28 +2980,49 @@ def care(a):
     for ds,m,last in rows:
         print(f"  ⚠ {m['이름']} {m['직분']} ({m['소속셀'] or '-'}) — 마지막 심방 {'없음' if last is None else last+f' ({ds}일 전)'}")
     if not rows: print("  (전원 최근 심방 완료)")
+    if 신규:
+        print(f"  · 등록하신 지 {days}일이 안 된 분 {len(신규)}명은 세지 않았습니다 — {', '.join(신규[:8])}"
+              + (" 외" if len(신규)>8 else ""))
+        print("    (아직 우리 교회에 계시지 않던 기간을 «안 뵌 기간»으로 세지 않습니다.)")
 def newcomer(a):
-    """새가족 정착 파이프라인 (벤치마크 #1)"""
-    db=load(); days=_intarg(a.days, 90, "일수"); rows=[]
+    """새가족 정착 파이프라인 — 최근 등록된 ★새가족의 다음 단계를 챙긴다.
+       ★2026-08-27 수리: 종전에는 «최근 N일 안에 등록된 사람»을 전부 새가족으로 삼았다.
+         master 가 지목한 두 곳(대시보드·헌금케어) 말고 ★여기에도 같은 틀린 자가 있었다 —
+         그대로 두면 처음 설치하신 날 이 카드에 ★기존 교인이 전부 올라온다.
+       ★날짜는 이제 «누가 새가족인가»가 아니라 «그 새가족이 언제 오셨나»에만 쓴다."""
+    db=load(); days=_intarg(a.days, 90, "일수"); rows=[]; older=0
     for m in db["교인"]:
+        if not _is_newfamily(m): continue
         reg=_days_since(m.get("등록일",""))
-        if reg is not None and reg<=days: rows.append((reg,m))
+        if reg is None: rows.append((0,m))                 # 등록일이 없어도 새가족이면 챙긴다
+        elif reg<=days: rows.append((reg,m))
+        else: older+=1
     rows.sort(key=lambda t:t[0])
-    print(f"■ 새가족 정착 관리 (최근 {days}일 등록): {len(rows)}명")
+    print(f"■ 새가족 정착 관리 (최근 {days}일 안에 등록된 새가족): {len(rows)}명")
     for reg,m in rows:
         vc=len(m["심방이력"]); wk=reg//7
         step="첫 심방(1주 내)" if vc==0 else ("소그룹 배정·4주 양육" if vc<3 else "정착 확인")
         flag=" ❗미이행" if (reg>=7 and vc==0) else ""
         print(f"  · {m['이름']} — 등록 {reg}일({wk}주) 전 · 심방 {vc}회 · 다음단계: {step}{flag}")
-    if not rows: print("  (최근 등록 새가족 없음)")
+    if not rows:
+        print(f"  (최근 {days}일 안에 등록된 새가족이 없습니다)")
+        print("   ※ 새가족은 「새가족 등록」 카드로 넣으셔야 여기에 올라옵니다.")
+        print("     「교우 등록·수정」으로 넣으신 분은 ★기존 성도로 봅니다(전부 새가족이 되지 않도록).")
+    if older:
+        print(f"  · 그 밖에 {days}일이 지난 새가족이 {older}명 있습니다 — 'newfamily-board' 에서 보세요.")
 
 def weekly_brief(a):
-    """주간 목회 브리핑 — 교인·출석·재정·이번주 생일·돌봄대상을 한 장 요약(카톡 발송 가능)."""
+    """주간 목회 브리핑 — 교인·출석·재정·이번주 생일·돌봄대상을 한 장 요약(카톡에 붙여넣을 수 있게 파일로 만들어 드립니다 — 프로그램이 보내지는 않습니다)."""
     import datetime as _dt
     db=load(); act=[m for m in db["교인"] if m.get("상태","재적")=="재적"]
     L=[f"■ {CHURCH} 주간 목회 브리핑  ({today()})",f"· 재적 교인 {len(act)}명"]
     if db.get("출석"):
-        last=db["출석"][-1]; cnt=last.get('계')
+        # ★«최근»은 목록의 ★마지막 원소가 아니라 ★날짜가 가장 늦은 것이다 (2026-08-28 master 판정 A).
+        #   「주간 출석 체크」가 저장할 때마다 출석 목록을 ★날짜 내림차순으로 정렬하기 때문에,
+        #   그 카드를 ★한 번이라도 쓰시면 [-1] 은 ★가장 오래된 기록이 된다.
+        #   ★갓 설치했을 땐 맞고 ★쓰기 시작하면 틀리는 무늬라 새 시험대로는 영영 안 잡힌다.
+        #   ⇒ 정렬 순서에 ★기대지 않는 형태로 고른다.
+        last=max(db["출석"], key=lambda r:(r.get('날짜') or '')); cnt=last.get('계')
         if cnt is None:
             md=last.get('명단'); cnt=len(md) if isinstance(md,list) else (last.get('남',0)+last.get('여',0))
         L.append(f"· 최근 출석: {last.get('날짜','')} {last.get('예배','')} {cnt}명")
@@ -2419,15 +3034,25 @@ def weekly_brief(a):
         b=(m.get('생년월일') or '')[5:]
         if b and any(b==(td+_dt.timedelta(days=o)).isoformat()[5:] for o in range(7)): bd.append(f"{m['이름']}")
     L.append(f"· 이번주 생일: {', '.join(bd) if bd else '없음'}")
-    caren=[(m['이름'] or '(이름 미입력)') for m in act if (not m['심방이력']) or (_days_since(m['심방이력'][-1]['날짜']) or 0)>=90]
-    L.append(f"· 돌봄 필요(심방 오래): {', '.join(caren[:10]) if caren else '없음'}")
+    # ★등록하신 지 90일이 안 된 분은 «오래 못 뵌 분»이 아니다 — 등록 전 기간을 세지 않는다.
+    #   심방이력의 «최근»도 [-1] 이 아니라 ★날짜 최대값으로 고른다(_last_visit).
+    caren=[(m['이름'] or '(이름 미입력)') for m in act
+           if (not _too_new(m,90)) and ((not m['심방이력']) or (_days_since(_last_visit(m)) or 0)>=90)]
+    L.append(f"· 돌봄 필요(심방 오래): {', '.join(caren[:10]) if caren else '없음'}"
+             + ("  (등록 90일 미만인 분은 세지 않았습니다)" if any(_too_new(m,90) for m in act) else ""))
     up=sorted([e for e in db.get("일정",[]) if e.get("날짜","")>=today()],key=lambda x:x["날짜"])[:5]
     if up: L.append("· 다가오는 일정: "+", ".join(f"{e['날짜']} {e.get('유형','')}{('·'+e['장소']) if e.get('장소') else ''}" for e in up))
     nf=[m for m in db["교인"] if m.get("유형")=="새가족" and m.get("정착여부")=="진행"]
     if nf: L.append(f"· 정착 중 새가족: {len(nf)}명 (newfamily-board 로 확인)")
     txt="\n".join(L); print(txt)
     out=os.path.join(CAT("01"),f"[주간브리핑] {today()}.txt"); open(out,'w',encoding='utf-8').write(txt)
-    print(f"  → 저장: {out} (카톡 발송: kakao --type custom --to all --text ...)")
+    # ★★T-1 ⓑ — ★다섯 자리 중 가장 위험했다(master 규격 v2).
+    #   「발송」이라 적고 그 옆에 명령을 주며 `--to all` 까지 붙어
+    #   ★«전체에게 보낸다»로 읽힌다. 실제로 하는 일은 ★txt 파일 하나를 만드는 것이다.
+    #   ⇒ 명령 예시를 지우고, ★무엇이 실제로 일어나는지만 적는다.
+    print(f"  → 저장: {out}")
+    print("     (카톡으로 알리시려면 이 파일을 열어 ★복사해 붙여넣으시면 됩니다 — "
+          "프로그램이 ★보내지는 않습니다.)")
 def prayer_add(a):
     """기도제목 접수 — 주제 태깅해 누적."""
     if not (a.text or a.name): print("⚠ 기도제목 내용이나 대상을 입력해 주세요."); return
@@ -2453,7 +3078,9 @@ def giving_insight(a):
     lapsed=[(n,d) for n,d in last.items() if (_days_since(d) or 0)>=days]
     print(f"■ 헌금 케어 신호 (정기헌금 {days}일+ 끊김): {len(lapsed)}명")
     for n,d in sorted(lapsed,key=lambda x:x[1]): print(f"  ⚠ {n} — 마지막 헌금 {d}")
-    newg=[m['이름'] for m in db['교인'] if m['이름'] in last and (_days_since(m.get('등록일','')) or 999)<=90]
+    # ★«새가족 중 헌금 시작» — 여기도 등록일 90일로 추정하고 있었다(2026-08-27 수리).
+    #   그대로 두면 처음 설치하신 날 헌금을 넣으신 ★기존 교인이 전부 «새가족»으로 뜬다.
+    newg=[m['이름'] for m in db['교인'] if m['이름'] in last and _is_newfamily(m)]
     if newg: print(f"  🌱 최근 새가족 중 헌금 시작: {', '.join(newg)}")
     if not lapsed and not newg: print("  (신호 없음 — 재정 기록에 '교인'을 넣어야 정확)")
 def schedule_add(a):
@@ -2544,7 +3171,7 @@ def casting(a):
         ctext(t.rows[i].cells[1],actor,11,GRAY,font=SERIF); ctext(t.rows[i].cells[2],extra,10,GRAY,font=SERIF)
         for j,w in enumerate([4.0,5.0,7.0]): t.rows[i].cells[j].width=Cm(w)
     tborders(t,"BBBBBB",4)
-    out=os.path.join(CAT("07"),f"[캐스팅] {sanit(a.title or '작품')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[캐스팅] {sanit(a.title or '작품')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 캐스팅표 생성: {out} (배역 {len(roles)}) · 입력형식: '배역:배우:파트' 를 ; 로 구분")
 def mission_add(a):
     """단기선교 프로젝트 등록 — 팀명·국가·기간·목적."""
@@ -2574,7 +3201,7 @@ def mission_roster(a):
         for j,k in enumerate(["이름","역할","여권만료","비상연락","건강"]):
             ctext(t.rows[i].cells[j],mm.get(k,""),9.5,GRAY,font=SERIF)
     tborders(t,"BBBBBB",4); para(d,f"총 {len(proj['팀원'])}명",10,GRAY,before=6,font=SANS)
-    out=os.path.join(CAT("05"),f"[선교팀명단] {sanit(proj['팀명'])}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("05"),f"[선교팀명단] {sanit(proj['팀명'])}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 선교 팀 명단: {out} ({len(proj['팀원'])}명)")
 def mission_checklist(a):
     """단기선교 준비 체크리스트 — 서류·건강·이동·사역·준비물(docx)."""
@@ -2591,7 +3218,7 @@ def mission_checklist(a):
     for g,items in groups:
         para(d,g,13,RGBColor(0x1F,0x5C,0x9E),True,before=8,after=3,font=SANS)
         for it in items: para(d,f"  ☐  {it}",11,after=2)
-    out=os.path.join(CAT("05"),f"[선교체크리스트] {sanit(a.title or '단기선교')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("05"),f"[선교체크리스트] {sanit(a.title or '단기선교')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 선교 준비 체크리스트: {out}")
 def mission_plan(a):
     """단기선교 준비 타임라인 — 출국일 기준 D-day 단계별 준비사항(날짜 자동계산). 미리 보고 준비."""
@@ -2679,7 +3306,7 @@ def mission_plan(a):
     para(d,"귀국 후",13,RGBColor(0x1F,0x5C,0x9E),True,before=11,after=3,font=SANS)
     for it in ["학생·미성년자 보호자 인계 확인","선교 보고서 작성","사진·영상 정리·보관","후원자 감사장·결과 보고","주일 간증·선교 보고 (회중과 은혜 나눔)","경비 결산·정산 (영수증 정리)","현지 사역지 후속 연락·중보기도 지속"]:
         para(d,f"  ☐  {it}",11,after=2)
-    out=os.path.join(CAT("05"),f"[선교 준비타임라인] {sanit(a.title or '단기선교')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("05"),f"[선교 준비타임라인] {sanit(a.title or '단기선교')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 선교 준비 타임라인: {out}"+(f" (출국 {a.dday} 기준 날짜 계산)" if depd else " (--dday 출국일 넣으면 날짜 자동계산)"))
     try: mission_checklist(a)   # 체크리스트도 함께 생성(타임라인 & 체크리스트 통합)
     except Exception as _e: print(f"   (체크리스트 생성 건너뜀: {str(_e)[:50]})")
@@ -2717,7 +3344,7 @@ def mission_field(a):
     for r in t.rows:
         for j,w in enumerate([3.0,9.0,4.0]): r.cells[j].width=Cm(w)
     tborders(t,"BBBBBB",4)
-    out=os.path.join(CAT("05"),f"[선교 현지정보] {sanit(proj['팀명'])}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("05"),f"[선교 현지정보] {sanit(proj['팀명'])}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 현지 정보 시트: {out}")
 def mission_english(a):
     """선교지 영어 회화집 — 인사·예배·전도·기도·일상·응급 필수 표현(한/영)."""
@@ -2734,7 +3361,7 @@ def mission_english(a):
         para(d,title,13,RGBColor(0x1F,0x5C,0x9E),True,before=8,after=3,font=SANS)
         for ko,en in rows:
             para(d,f"· {ko}",11,NAVY,after=1); para(d,f"    {en}",11,GRAY,after=3,font=SANS)
-    out=os.path.join(CAT("05"),f"[선교 영어회화]_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("05"),f"[선교 영어회화]_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 선교지 영어 회화집: {out}")
 def mission_sermon(a):
     """선교지 영어 설교 준비 — 한/영 대역 구조 + 영어 성경본문(WEB) 자동삽입(통역용)."""
@@ -2762,7 +3389,7 @@ def mission_sermon(a):
     para(d,"Conclusion / 결론·결단",13,MAROON,True,before=6,after=3,font=SANS)
     para(d,"  (invitation to receive Jesus)",10.5,LG,italic=True,after=4)
     folder=CAT("09")
-    out=os.path.join(folder,f"[선교영어설교] {sanit(a.title or 'sermon')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(folder,f"[선교영어설교] {sanit(a.title or 'sermon')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 선교지 영어 설교 준비: {out}"+(" · 영어 성경본문 자동삽입" if eng else " (본문 지정 시 영어성경 자동삽입)"))
 def sermon_log(a):
     """설교 기록 — 언제 어떤 본문·제목으로 설교했는지 이력 저장(반복 방지·시리즈)."""
@@ -2804,7 +3431,7 @@ def sermon_reuse(a):
         points=src.get("대지","") or "", series=src.get("시리즈",""), service=a.service or src.get("예배","") or "", date=a.date or "")
     sermon(na)
 def newfamily_add(a):
-    """새가족 등록 — 정착 관리 시작(인도자·첫방문·소속셀). 부흥 교회 뒷문 방지."""
+    """새가족 등록 — 정착 관리 시작(인도자·첫방문·구역(셀)). 부흥 교회 뒷문 방지."""
     if not (a.name or "").strip(): print("⚠ 새가족 이름을 입력해 주세요."); return
     db=load(); db["_seq"]+=1
     m={"id":db["_seq"],"이름":a.name,"성별":a.sex or "","생년월일":a.birth or "","연락처":a.tel or "",
@@ -2812,7 +3439,7 @@ def newfamily_add(a):
        "가족":[],"상태":"새가족","심방이력":[],"기도제목누적":[],"메모":a.memo or "",
        "유형":"새가족","첫방문":a.date or today(),"정착단계":0,"양육기록":[],"정착여부":"진행"}
     db["교인"].append(m); save(db)
-    print(f"✅ 새가족 등록: {a.name} · 인도자 {a.leader or '-'} · 셀 {a.cell or '-'} — 정착관리 시작")
+    print(f"✅ 새가족 등록: {a.name} · 인도자 {a.leader or '-'} · 구역(셀) {a.cell or '-'} — 정착관리 시작")
     print("  다음: 1주내 첫 양육 접촉 → newfamily-step 으로 기록")
 def newfamily_step(a):
     """새가족 양육 기록 — 주차별 심방/전화/문자 접촉 + 단계 진행."""
@@ -2838,6 +3465,153 @@ def newfamily_graduate(a):
     if not hit: print(f"✗ 새가족 '{a.name}' 없음"); return
     m=hit[0]; m["정착여부"]="정착"; m["상태"]="재적"; m["직분"]=a.role or "성도"; m["유형"]="교인"
     save(db); print(f"✅ [{m['이름']}] 정착 완료 → 정식 교인 전환 (양육 {len(m.get('양육기록',[]))}회)")
+
+def _nf_signals(m):
+    """이분이 ★정말 새가족일 만한 흔적. «판정»이 아니라 «보여 드릴 근거»다.
+       ★프로그램이 추측해서 사람의 신분을 정한 것이 이번 사고의 뿌리였다.
+         그래서 여기서도 ★정하지 않는다 — 흔적을 세어 목사님께 보여 드리고 고르시게 한다."""
+    s=[]
+    st=int(m.get("정착단계") or 0)
+    yr=len(m.get("양육기록") or [])
+    vs=len(m.get("심방이력") or [])
+    if st: s.append(f"정착 {st}단계")
+    if yr: s.append(f"양육 {yr}회")
+    if vs: s.append(f"심방 {vs}회")
+    d=_days_since(m.get("등록일",""))
+    if d is not None: s.append(f"등록 {d}일 전")
+    return s, bool(st or yr)      # 두 번째 값 = ★양육 흔적(이분은 기본으로 보호한다)
+
+def member_restore_existing(a):
+    """🔁 기존 성도로 일괄 정리 — 잘못 «새가족»으로 박힌 분들을 되돌립니다.
+
+       ★왜 필요한가: 종전 판은 «등록일이 90일 이내»면 새가족으로 셌습니다. 그래서 처음 설치하시고
+         기존 교인을 넣으신 날 ★전원이 새가족으로 표시됐습니다. 세는 자는 고쳤지만, 그 사이
+         '새가족 등록' 카드로 잘못 넣으신 분이 있다면 자료에 그대로 남아 있습니다 — 그걸 되돌립니다.
+
+       ★안전장치(전부 지켜집니다)
+         ① 아무것도 안 넣고 실행하면 ★미리보기입니다 — 자료는 손대지 않습니다.
+         ② 실제로 바꾸려면 '실제로 정리'에 1 을 넣으셔야 합니다.
+         ③ 바꾸기 ★직전에 자동으로 백업합니다(백업이 안 되면 중단합니다).
+         ④ ★되돌릴 수 있습니다 — 무엇을 바꿨는지 기록해 두고, '되돌리기'에 1 을 넣으면 원래대로 갑니다.
+         ⑤ ★양육 흔적이 있는 분(정착단계·양육기록)은 ★기본으로 건드리지 않습니다 —
+            정말 새로 오신 분이 섞여 있을 수 있기 때문입니다. 그분도 정리하시려면 ★이름을 직접 적으세요.
+         ⑥ 이름을 적으시면 ★그분들만 정리합니다(전체 일괄과 개별 선택 둘 다 됩니다)."""
+    db=load()
+    undo=str(getattr(a,"undo","") or "").strip() in ("1","y","Y","예","네","되돌리기")
+    apply=str(getattr(a,"apply","") or "").strip() in ("1","y","Y","예","네","정리","실제정리")
+    picked=[s.strip() for s in re.split(r"[;,]", (getattr(a,"names","") or "")) if s.strip()]
+
+    # ── ④ 되돌리기 ────────────────────────────────────────────────────────
+    if undo:
+        log=(db.get("_정리기록") or [])
+        if not log:
+            print("■ 되돌릴 정리 기록이 없습니다."); return
+        last=log[-1]
+        if not apply:
+            print(f"👀 되돌리기 미리보기 — {last.get('시각','')} 에 정리한 {len(last.get('변경',[]))}명을 원래대로 돌립니다.")
+            for c in last.get("변경",[])[:10]:
+                print(f"   · {c.get('이름')} — 기존 성도 → 새가족(정리 전 상태)으로 복원")
+            if len(last.get("변경",[]))>10: print(f"   · … 외 {len(last['변경'])-10}명")
+            print("   자료는 아직 바뀌지 않았습니다. → '실제로 정리'에 1 을 함께 넣으시면 되돌립니다.")
+            return
+        try:
+            bdir=backup(None); print(f"🛟 되돌리기 전 자동 백업 완료 ({os.path.basename(str(bdir))})")
+        except Exception as e:
+            print(f"⚠ 자동 백업에 실패했습니다({e}). 안전을 위해 중단합니다."); return
+        back=0
+        for c in last.get("변경",[]):
+            hit=[m for m in db["교인"] if m.get("id")==c.get("id")]
+            if not hit: continue
+            m=hit[0]
+            for k,v in (c.get("이전") or {}).items():
+                if v is None: m.pop(k,None)
+                else: m[k]=v
+            back+=1
+        db["_정리기록"]=log[:-1]; save(db)
+        print(f"✅ 되돌렸습니다 — {back}명이 정리 전 상태로 돌아갔습니다.")
+        return
+
+    # ── 대상 고르기 ───────────────────────────────────────────────────────
+    targets=[m for m in db["교인"] if _is_newfamily(m)]
+    if picked:
+        want={n for n in picked}
+        targets=[m for m in targets if (m.get("이름") or "").strip() in want]
+        미발견=[n for n in picked if not any((m.get("이름") or "").strip()==n for m in db["교인"])]
+    else:
+        미발견=[]
+    protect=[]
+    if not picked:                      # ⑤ 이름을 안 적으셨으면 ★양육 흔적이 있는 분은 뺀다
+        keep=[]
+        for m in targets:
+            sig,cared=_nf_signals(m)
+            (protect if cared else keep).append(m)
+        targets=keep
+
+    print("─"*46)
+    print(f"🔁 기존 성도로 일괄 정리 — 지금 «새가족»으로 되어 있는 분 중 {len(targets)}명이 대상입니다.")
+    if not targets and not protect:
+        print("  · 새가족으로 되어 있는 분이 없습니다 — 정리하실 것이 없습니다.")
+        print("    (지금 화면의 «새가족» 숫자는 '새가족 등록' 카드로 넣으신 분만 셉니다)")
+        print("─"*46); return
+    for m in targets[:20]:
+        sig,_=_nf_signals(m)
+        print(f"   · {m.get('이름','')} — {' · '.join(sig) if sig else '흔적 없음'}  →  기존 성도(재적)")
+    if len(targets)>20: print(f"   · … 외 {len(targets)-20}명")
+    if protect:
+        print()
+        print(f"  🛡 양육 흔적이 있어 ★건드리지 않은 분 {len(protect)}명 — 정말 새가족일 수 있습니다:")
+        for m in protect[:10]:
+            sig,_=_nf_signals(m)
+            print(f"     · {m.get('이름','')} — {' · '.join(sig)}")
+        if len(protect)>10: print(f"     · … 외 {len(protect)-10}명")
+        print("     이분들도 정리하시려면 '이름'칸에 그 이름을 직접 적어 주세요(;로 구분).")
+    if 미발견:
+        print(f"  ⚠ 교적에서 못 찾은 이름: {', '.join(미발견)}")
+    # ★남는 위험을 ★숨기지 않고 말한다 (실측에서 드러난 한계).
+    #   ★오늘 정말 새로 오신 분은 «양육 흔적»이 아직 없다 — 그래서 잘못 박힌 분과
+    #     ★자료만으로는 구별되지 않는다. 프로그램이 또 추측하면 같은 사고가 반복된다.
+    #   ⇒ 추측하지 않고, ★그 사실을 알려 드리고 고르시게 한다.
+    _fresh=[m for m in targets if not _nf_signals(m)[1]]
+    if not picked and _fresh:
+        print()
+        print(f"  ⚠ 위 {len(_fresh)}명 중에 ★정말 최근에 새로 오신 분이 섞여 있을 수 있습니다.")
+        print("     아직 양육·심방 기록이 없으면, 잘못 넣으신 분인지 진짜 새가족인지")
+        print("     프로그램은 ★구별할 방법이 없습니다(추측하지 않겠습니다).")
+        print("     → 명단을 한 번 보시고, 남기실 분이 있으면 ★정리할 분 이름만 '이름'칸에 적어 주세요.")
+        print("     → 전부 정리하셔도 됩니다. 나중에 '되돌리기'로 원래대로 돌리실 수 있습니다.")
+    print("─"*46)
+
+    # ── ① 미리보기가 기본 ─────────────────────────────────────────────────
+    if not apply:
+        print("👀 지금은 ★미리보기입니다. 자료는 아직 바뀌지 않았습니다.")
+        print("   → 위 명단이 맞으면 '실제로 정리'에 1 을 넣고 다시 실행해 주세요.")
+        print("   → 정리한 뒤에도 '되돌리기'에 1 을 넣으시면 원래대로 돌릴 수 있습니다.")
+        return
+    if not targets:
+        print("정리할 분이 없어 아무것도 바꾸지 않았습니다."); return
+
+    # ── ③ 바꾸기 직전 백업 ────────────────────────────────────────────────
+    try:
+        bdir=backup(None); print(f"🛟 정리 전 자동 백업 완료 ({os.path.basename(str(bdir))})")
+    except Exception as e:
+        print(f"⚠ 자동 백업에 실패했습니다({e}). 안전을 위해 정리를 중단합니다.")
+        print("   먼저 자료를 백업해 주세요 — 화면의 「자료 백업」(번호 메뉴는 88번).")
+        return
+    changed=[]
+    for m in targets:
+        before={k:m.get(k) for k in ("상태","유형","정착여부","정착단계","첫방문")}
+        m["상태"]="재적"
+        m["유형"]="교인"
+        for k in ("정착여부","정착단계","첫방문"):
+            m.pop(k,None)
+        if (m.get("직분") or "")=="새가족": m["직분"]="성도"
+        changed.append({"id":m.get("id"),"이름":m.get("이름"),"이전":before})
+    db.setdefault("_정리기록",[]).append(
+        {"작업":"기존성도정리","시각":datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),"변경":changed})
+    db["_정리기록"]=db["_정리기록"][-10:]        # 기록이 무한히 쌓이지 않게 최근 10회만
+    save(db)
+    print(f"✅ {len(changed)}명을 ★기존 성도로 정리했습니다 — 이제 새가족 수에 들어가지 않습니다.")
+    print("   되돌리시려면 이 카드의 '되돌리기'에 1, '실제로 정리'에 1 을 함께 넣고 실행하세요.")
 CAREMSG={"장례":"삼가 조의를 표합니다","입원":"쾌유를 빕니다","출생":"출산을 축하합니다","결혼":"결혼을 축하합니다","회갑":"회갑을 축하합니다"}
 def careevent_add(a):
     """🎉 축하·위로 문자 (상황별·경조사 통합) — 상황/사건과 이름을 넣으면 골라 쓰는 카톡 문구를 만들고,
@@ -2943,7 +3717,7 @@ def donation_receipt(a):
     para(d,"위와 같이 기부하였음을 증명합니다. (소득세법에 따른 기부금 세액공제용)",11,NAVY,True,before=10,after=16)
     para(d,f"{y}년      월      일",11,GRAY,AL.CENTER,after=14)
     para(d,f"{CHURCH}   담임 {PASTOR}   (인)",13,NAVY,True,AL.CENTER,font=SANS)
-    out=os.path.join(CAT("06"),f"[기부금영수증] {sanit(a.name or '')}_{y}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("06"),f"[기부금영수증] {sanit(a.name or '')}_{y}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 기부금영수증 발급: {out} · {a.name} {y}년 {total:,}원")
 def vip_add(a):
     """태신자(전도 대상) 등록 — 담당 성도·중보기도(전도 관리)."""
@@ -3002,8 +3776,9 @@ def event_plan(a):
               "② 장소·프로그램·예산을 초기에 함께 결정 — 셋은 서로 맞물립니다(장소가 프로그램을, 예산이 장소를 정합니다).",
               "③ 담당을 일찍 세워 위임 — 목표만 공유하고 맡기십시오. 함께 준비할 때 더 멀리 갑니다."]:
         para(d,t,10,after=2)
-    para(d,"※ 수련회·여름사역이라면 '여름성경학교·수련회 준비' 참고자료 카드를 꼭 함께 보세요 — 장소 고르는 법(유형별 장단점·선택 기준·비교평가표·답사 체크리스트·예약계약), 프로그램 설계(6요소·시간배분·하루 리듬), D-60 준비 로드맵이 자세히 담겨 있습니다.",9,LG,before=8,font=SANS)
-    out=os.path.join(CAT("07"),f"[행사기획] {sanit(a.title or '행사')}_{today()}.docx"); _savedoc(d,out)
+    # ★섹션 이름 갱신 — 「목회 참고자료」 → 「📖 자료」 (위 lesson() 과 같은 수리)
+    para(d,"※ 수련회·여름사역이라면 「📖 자료」 섹션의 '여름성경학교·수련회 준비' 카드를 꼭 함께 보세요 — 장소 고르는 법(유형별 장단점·선택 기준·비교평가표·답사 체크리스트·예약계약), 프로그램 설계(6요소·시간배분·하루 리듬), D-60 준비 로드맵이 자세히 담겨 있습니다.",9,LG,before=8,font=SANS)
+    out=os.path.join(CAT("07"),f"[행사기획] {sanit(a.title or '행사')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 행사 준비 기획서: {out} (준비 3원칙·참고자료 안내 포함)")
 _GREET_CACHE={}
 def _greet_pool(kind):
@@ -3029,7 +3804,7 @@ def _pick_greet(m, kind, year, pool):
     hist[ys]=chosen.get('번호')
     return (chosen, prev, True)
 def birthday(a):
-    """🎂 성도 생일·결혼기념일 축하 — 다가오는 것(향후 N일·기본30) 조회 + 축하 문자 자동생성(카톡 붙여넣기·100문구 연도순환) + 셀 명단.
+    """🎂 성도 생일·결혼기념일 축하 — 다가오는 것(향후 N일·기본30) 조회 + 축하 문자 자동생성(카톡 붙여넣기·100문구 연도순환) + 구역 명단.
        ★매년 다른 문구가 자동 선택되고, 지난해 보낸 문구도 함께 보여드립니다(중복 방지)."""
     import datetime as _dt
     from collections import defaultdict
@@ -3194,7 +3969,17 @@ def read_file(a):
     print(f"■ {os.path.basename(p)} ({len(t)}자)")
     print(t[:3000]+("\n... (이하 생략, 전체는 파일에서)" if len(t)>3000 else ""))
 def ppt_lyrics(a):
-    """찬양 가사 PPT — 예배 프로젝터용 파워포인트 슬라이드(등록곡 가사, 한 소절씩)."""
+    """찬양 가사 만들기 — 형식을 골라 PPT(기본) 또는 문서로. (옛 이름: 찬양 가사 PPT + 가사 스크린)"""
+    # ★★[M2 통합 2026-08-29 · 오너 조건부 승인 · 관문 G1~G5 통과] ★★
+    #   ★한 카드에서 «형식»만 고르게 한다 — 칸은 하나도 사라지지 않는다(G1).
+    #   ★산출물 이름은 ★전과 똑같이 유지한다(G5): PPT=[찬양PPT].pptx · 문서=[가사스크린].docx
+    #   ★옛 명령 `lyrics-screen` 은 ★지우지 않는다(G3) — 그대로 쳐도 돈다.
+    #   ★되돌리기: 이 블록(★★[M2 …] ~ 끝)과 add("ppt",…) 의 "form" 인자만 지우면 원래대로.
+    _form = (getattr(a, "form", None) or "").strip()
+    if _form and _form not in ("PPT", "ppt", "피피티", "슬라이드"):
+        # 「문서」·「가사 스크린」 등 PPT 가 아닌 말이면 문서 쪽으로 보낸다
+        return lyrics_screen(a)
+    # ★★[M2 통합] 끝 — 아래는 종전 PPT 경로 그대로 ★★
     # ★침묵 제거만 한다 — 동작은 한 글자도 안 바뀐다 (2026-08-27 · master 판정 ①).
     #   전에는 이 import 가 try 밖이라, 부품이 없는 컴퓨터에서는 예외가 그대로 위로 새어
     #   화면에 ★아무 문구도 안 떴다(=«눌렀는데 반응이 없다»). `export_excel` 과 같은 병이다.
@@ -3211,8 +3996,9 @@ def ppt_lyrics(a):
         print("  (찬양곡·가사 자료는 그대로입니다. 이 카드만 실행되지 않았습니다.)")
         return
     import json as _j
-    lib=_j.load(open(SONGLIB,encoding='utf-8')) if os.path.exists(SONGLIB) else []
-    byn={re.sub(r'\s','',s['제목']):s for s in lib}
+    # ★② 유령 곡 — ①과 같은 기전. 이 자리가 안 막히면 ★예배 프로젝터용 PPT 가 0장으로 나간다.
+    lib=_songlib()
+    byn={k:s for k,s in ((re.sub(r'\s','',s['제목']),s) for s in lib) if k}
     songs=[s.strip() for s in (a.songs or "").split(";") if s.strip()]
     prs=Presentation(); prs.slide_width=Inches(13.333); prs.slide_height=Inches(7.5); blank=prs.slide_layouts[6]
     def slide(text,size=40):
@@ -3280,7 +4066,7 @@ def sermon_files(a):
     qy=(getattr(a,'query','') or "").strip()
     if qy:   # 이력 검색: 설교 기록(본문·제목)에서 찾기
         import types
-        return sermon_list(types.SimpleNamespace(query=qy,service=getattr(a,'service','') or ""))
+        return sermon_list(types.SimpleNamespace(query=qy,service=getattr(a,'service','') or "",text="",year=""))
     bases=[CAT("09")]
     bd=_C.get("백업폴더")
     if bd and os.path.isdir(os.path.join(bd,"09 설교")): bases.append(os.path.join(bd,"09 설교"))
@@ -3425,14 +4211,25 @@ def my_files(a):
 def song_sheet(a):
     """작곡한 곡 악보 열기 — 등록된 곡의 악보 파일을 열어 다듬기."""
     import json as _j
-    if not os.path.exists(SONGLIB): print("등록 곡 없음 — '찬양곡·자작곡 등록'에서 등록해 주세요"); return
-    lib=_j.load(open(SONGLIB,encoding='utf-8'))
+    lib=_songlib()          # ★유령 곡 제외 · 문을 하나로 모은다(2026-08-28 수리)
+    if not lib: print("등록 곡 없음 — '찬양곡·자작곡 등록'에서 등록해 주세요"); return
     hit=[s for s in lib if a.title and a.title in s.get("제목","")]
     if not hit: print(f"✗ '{a.title}' 곡 없음"); return
     p=hit[0].get("악보","")
     if p and os.path.exists(p):
         # ★_openfile() 을 태운다(위 sermon_files 와 같은 이유 — 폰에서는 받기 번호표가 된다)
-        try: _openfile(p); print(f"▶ 악보 여는 중: {hit[0]['제목']}")
+        # ★폰에서는 «여는 중»이라 말하지 않는다 (2026-09-01 수리).
+        #   폰에서는 ★아무것도 열리지 않는다. 받을 수 있는 형식이면 화면이 ★받기 단추를 붙이고,
+        #   못 받는 형식(뮤즈스코어 .mscz·MIDI·musicxml 등)이면 화면이 사실을 말한다.
+        #   여기서 «여는 중»이라 하면 ★안 된 일을 됐다고 말하는 것이 된다
+        #   (2026-08-17 「📂 내 PC 열림」 사고와 ★같은 계열).
+        #   ★PC 는 종전 그대로다 — 거기서는 실제로 열리므로 «여는 중»이 참이다(기능 후퇴 0).
+        try:
+            _openfile(p)
+            if os.environ.get("CHURCH_WEB")=="1" and os.environ.get("CHURCH_REMOTE")=="1":
+                print(f"🎼 악보: {hit[0]['제목']} ({os.path.basename(p)})")
+            else:
+                print(f"▶ 악보 여는 중: {hit[0]['제목']}")
         except Exception as e: print(f"✗ {e}")
     else: print(f"✗ '{hit[0]['제목']}' 악보 파일 없음 ('찬양곡·자작곡 등록'에서 악보를 함께 등록해 주세요)")
 # _IMPORT_ALIAS — 엑셀/CSV 열 이름이 교회마다 달라도 알아서 맞춘다(일괄 등록용)
@@ -3573,7 +4370,7 @@ def member_import(a):
     path=(getattr(a,"file","") or "").strip().strip('"').strip("'")
     if not path:
         print("■ 엑셀 또는 CSV 파일을 넣어 주세요.")
-        print("  · 첫 줄에 '이름 / 연락처 / 직분 / 소속셀' 같은 제목이 있으면 알아서 맞춰 드립니다.")
+        print("  · 첫 줄에 '이름 / 연락처 / 직분 / 구역(셀)' 같은 제목이 있으면 알아서 맞춰 드립니다.")
         print("  · 이름 칸만 있어도 등록됩니다. 나머지는 나중에 채우셔도 됩니다.")
         return
     if not os.path.isabs(path):
@@ -3628,7 +4425,7 @@ def member_import(a):
            ["사용하지 않은 칸",", ".join(unknown[:10]) or "-"],
            ["원본에서 읽은 줄 수",len(rows)],["새로 등록할 분",len(news)],
            ["이미 등록된 분",len(dups)],["옮기지 않은 줄",len(mdrop)]]
-    _mtab=[("새로 등록할 명단",["이름","직분","연락처","소속셀","생년월일"],
+    _mtab=[("새로 등록할 명단",["이름","직분","연락처","구역(셀)","생년월일"],
             [[x.get("이름",""),x.get("직분",""),x.get("연락처",""),x.get("소속셀",""),x.get("생년월일","")] for x in news]),
            ("이미 등록된 분",["이름","직분","연락처"],
             [[x.get("이름",""),x.get("직분",""),x.get("연락처","")] for x in dups])]
@@ -3851,7 +4648,7 @@ def _fin_rows(rows, headers, shape, year):
             for h,mn in mcols:
                 v=_fin_amt(r.get(h,""))
                 if v: out.append({"날짜":f"{year}-{mn:02d}-01","구분":kind,"항목":label,"금액":v,"교인":"","부서":"","메모":"월별 집계"})
-        if not section: warn.append("'수입'·'지출' 구역 표시를 찾지 못해 항목 이름으로 추정했습니다 — 미리보기에서 꼭 확인해 주세요.")
+        if not section: warn.append("'수입'·'지출' 구역(셀) 표시를 찾지 못해 항목 이름으로 추정했습니다 — 미리보기에서 꼭 확인해 주세요.")
     return out,skipped,warn,unknown_kind,dropped
 
 
@@ -4215,6 +5012,212 @@ def _phone_addr():
         return "", f"{vwhy} 그리고 {lwhy}", ""
     return "",vwhy,""
 
+_PHONE_FIX_BAT="★ 폰에서 열리게 하기 (한 번만 관리자로 실행).bat"
+def _phone_diag():
+    """★읽기만 하는 진단 — 고치지 않는다(오너 확정 2026-08-28: 오늘은 진단·안내까지).
+
+       ★★2026-08-28 재작성 — 앞 판은 ★거짓을 냈다. 리뷰어가 잡고 master 가 재현했다:
+         ①«포트 8899 규칙»만 물었다 → 이 컴퓨터의 허용은 포트가 아니라 ★exe 경로 규칙이라
+           «규칙 0건»이 나왔는데 ★폰은 실제로 닿고 있었다.
+         ②«망이 공용이면 막힌다»고 단정했다 → 여기 허용 규칙은 ★전부 Profile=Public 이라
+           ★공용일 때만 통하고 있었다. ★정반대를 말한 것이다.
+       ⇒ ★판정은 ★교집합으로 한다: «허용 규칙이 듣는 망(Profile)» ∩ «지금 붙어 있는 망(Category)».
+         비면 막힘, 겹치면 안 막힘.
+       ★권한: netstat · 레지스트리 · Get-NetConnectionProfile · Get-NetFirewallApplicationFilter 는
+         ★비관리자에서 읽힌다. ★Get-NetFirewallPortFilter 는 ★관리자를 요구한다(Access denied) —
+         그래서 ★쓰지 않는다. 앞 판 독스트링의 «셋 다 읽힌다»는 ★틀린 문장이었다(둘이다).
+       ★못 읽은 것은 None 으로 두고 화면에 «확인 못 함»이라 적는다. ★표본 0 은 측정 실패다."""
+    import subprocess as _sp, sys as _sys, re as _re
+    r = {"열린주소": None, "허용망": None, "네트워크": None}
+
+    def _ps(script, sec):
+        # ★PowerShell 은 기본으로 ★콘솔 코드페이지(한국은 cp949)로 내보낸다.
+        #   그래서 ★한글이 든 경로·와이파이 이름이 ★깨져 돌아오고, 경로 대조가 조용히 실패한다.
+        #   (실측 2026-08-28: D:\교회행정시스템… 이 D:\??ȸ…  로 와서 «허용 없음»이라는 ★거짓을 냈다.)
+        #   ⇒ 스크립트 맨 앞에서 ★출력 인코딩을 UTF-8 로 고정한다.
+        script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + script
+        try:
+            o = _sp.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=sec)
+            return (o.stdout or "") if o.returncode == 0 else None
+        except Exception:
+            return None
+
+    # (가) 8899 가 지금 어느 주소에 열려 있나
+    try:
+        o = _sp.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=15)
+        if o.returncode == 0:
+            addrs = []; 총 = 0
+            for ln in (o.stdout or "").splitlines():
+                q = ln.split()
+                if len(q) >= 4 and q[0].upper() == "TCP" and q[3].upper() == "LISTENING":
+                    총 += 1
+                    if q[1].endswith(":8899"):
+                        a = q[1].rsplit(":", 1)[0]
+                        if a not in addrs: addrs.append(a)
+            if 총 > 0: r["열린주소"] = addrs      # ★표본 0 = 측정 실패
+    except Exception:
+        pass
+
+    # (다) 지금 붙어 있는 망
+    out = _ps("foreach($p in (Get-NetConnectionProfile -ErrorAction Stop)){"
+              "Write-Output ('NET=' + $p.Name + '|' + $p.NetworkCategory + '|' + $p.InterfaceAlias)}", 25)
+    if out is not None:
+        nets = []
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if ln.startswith("NET="):
+                b = ln[4:].split("|")
+                if len(b) >= 2: nets.append((b[0], b[1], b[2] if len(b) > 2 else ""))
+        if nets: r["네트워크"] = nets
+
+    # (나) 허용 규칙이 ★듣는 망 — ①이 프로그램 exe 경로 규칙 ②8899 포트 규칙(레지스트리)
+    # ★출처가 둘이다(①exe 경로 규칙=PowerShell ②8899 포트 규칙=레지스트리).
+    #   ★«허용이 하나도 없다»고 말하려면 ★둘 다 읽었어야 한다 — 한쪽만 읽고 «없습니다»라고 하면
+    #   못 본 쪽에 허용이 있어도 «막힙니다»라는 ★거짓을 낸다. ⇒ 출처별로 성패를 따로 센다.
+    허용 = set(); ps_ok = False; reg_ok = False
+    exe = (getattr(_sys, "executable", "") or "").replace(chr(92), "/").lower()
+    ps = ("$r=Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow -ErrorAction Stop;"
+          "Write-Output ('CNT=' + $r.Count);"
+          "foreach($x in $r){$a=($x|Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program;"
+          "if($a){Write-Output ('APP=' + $x.Profile + '|' + $a)}}")
+    out = _ps(ps, 90)
+    # ★★읽기 «성공»과 내용 «신뢰»는 다른 명제다 (2026-08-29 수리 · worker-2 발견 · master 승인).
+    #   ★종전 결함: PowerShell 이 ★rc=0 으로 돌아왔는데 ★경로 글자가 깨져 있으면(cp949 등)
+    #     경로 대조가 조용히 빗나가 허용이 0 이 되고, ★레지스트리 쪽이 정상이면 ps_ok·reg_ok 가
+    #     ★둘 다 참이라 아래 L«허용 or (ps_ok and reg_ok)» 를 통과해 ★«없습니다 — 윈도우가 막습니다»
+    #     라는 ★확신에 찬 거짓을 냈다. ★목사님을 방화벽 미로로 보내는 문장이다.
+    #     (실증: 고장주입 #5 — 깨진 경로 + 레지스트리 정상 ⇒ «없습니다». 같은 조건에서 레지스트리까지
+    #      죽이면 «확인 못 함»이 나왔다 ⇒ 보호가 ★읽기 실패에만 듣고 ★내용 오염에는 안 들었다.)
+    #   ★판정은 ★열거가 아니라 ★구조로 한다: 윈도우 경로에는 «?» 가 ★올 수 없고,
+    #     «�» 는 디코드 실패의 표지다. ⇒ 둘 중 하나라도 있으면 ★그 출처는 못 믿는다.
+    #   ★한 줄이라도 오염됐으면 출처 전체를 못 믿는다 — 깨진 그 줄이 ★내 규칙이었을 수 있다.
+    #   ⇒ ★«없다»고 말하지 않고 ★«확인 못 함»으로 떨어진다. ★모르면 모른다고 한다.
+    def _오염(s):
+        return ("?" in s) or ("�" in s)
+    if out is not None:
+        cnt = -1; ps_오염 = False
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if ln.startswith("CNT="):
+                try: cnt = int(ln[4:])
+                except Exception: pass
+            elif ln.startswith("APP="):
+                pr, _sep, app = ln[4:].partition("|")
+                if _오염(app):
+                    ps_오염 = True      # ★대조할 수 없는 글자 — 빗나간 것을 «없음»으로 읽지 않는다
+                    continue
+                if app.replace(chr(92), "/").lower() == exe:
+                    for t in pr.replace(" ", "").split(","):
+                        if t: 허용.add(t)
+        if cnt > 0 and not ps_오염: ps_ok = True   # ★규칙이 한 건도 없으면 «허용 없음»이 아니라 «못 읽음»
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+            "SYSTEM" + chr(92) + "CurrentControlSet" + chr(92) + "Services" + chr(92) +
+            "SharedAccess" + chr(92) + "Parameters" + chr(92) + "FirewallPolicy" + chr(92) + "FirewallRules")
+        본줄 = 0
+        for i2 in range(winreg.QueryInfoKey(k)[1]):
+            try: _nm, val, _t = winreg.EnumValue(k, i2)
+            except Exception: continue
+            본줄 += 1
+            if not isinstance(val, str): continue
+            u = val.upper()
+            if "LPORT=8899" in u and "DIR=IN" in u and "ACTION=ALLOW" in u and "ACTIVE=TRUE" in u:
+                m = _re.search(r"Profile2?=([A-Za-z]+)", val)
+                허용.add(m.group(1) if m else "Any")
+        if 본줄 > 0: reg_ok = True
+    except Exception:
+        pass
+    # ★허용을 ★찾았으면 그것만으로 참이다(찾은 것은 찾은 것이다).
+    #   ★못 찾았을 때만 ★둘 다 읽었는지를 따진다 — 하나라도 못 읽었으면 «없다»가 아니라 «확인 못 함».
+    if 허용 or (ps_ok and reg_ok):
+        r["허용망"] = 허용
+    return r
+
+
+def _phone_diag_lines():
+    """진단을 ★사람 말로.
+
+       ★★«폰에서 열립니다»는 우리가 낼 수 없는 문장이다 — 공유기의 «단말 간 차단»·게스트 와이파이·
+         폰이 LTE 나 다른 와이파이에 붙어 있는 것·폰과 PC 의 백신 방화벽은 ★이 컴퓨터가 원리적으로 못 본다.
+       ⇒ 정직한 최대치 = «이 컴퓨터 쪽에서 막는 것은 안 보입니다. 남은 것은 공유기와 폰 쪽입니다.»"""
+    d = _phone_diag()
+    L = ["", "  ▣ 지금 이 컴퓨터 상태 (프로그램이 ★읽기만 해서 확인한 것입니다)"]
+    막힌것 = []; 판정불가 = []
+
+    a = d["열린주소"]
+    if a is None:
+        L.append("     (가) 폰이 들어올 문(8899)  : ★확인 못 함 — 이 컴퓨터에서 읽지 못했습니다")
+        판정불가.append("문이 열렸는지")
+    elif not a:
+        L.append("     (가) 폰이 들어올 문(8899)  : ★닫혀 있습니다 — 프로그램이 꺼져 있거나 폰 접속이 꺼져 있습니다")
+        막힌것.append("프로그램이 켜져 있어야 합니다")
+    else:
+        보임 = [x for x in a if x not in ("127.0.0.1", "::1")]
+        L.append("     (가) 폰이 들어올 문(8899)  : 열려 있습니다 — " + " · ".join(a))
+        if not 보임:
+            L.append("          ※ ★이 컴퓨터 안(127.0.0.1)에서만 열렸습니다 — 폰에서는 안 보입니다")
+            막힌것.append("폰이 볼 수 있는 주소로 열려 있지 않습니다")
+
+    n = d["네트워크"]; 지금망 = set()
+    if n is None:
+        L.append("     (다) 지금 붙어 있는 망     : ★확인 못 함")
+        판정불가.append("지금 어느 망에 붙었는지")
+    else:
+        한글 = {"Private": "개인", "Public": "공용", "DomainAuthenticated": "회사(도메인)"}
+        for nm, cat, _al in n:
+            지금망.add(cat)
+            L.append(("     (다) 망 «%s»" % nm).ljust(32) + ": " + 한글.get(cat, cat))
+
+    f = d["허용망"]
+    if f is None:
+        L.append("     (나) 윈도우 방화벽 허용    : ★확인 못 함")
+        판정불가.append("방화벽이 허용하는지")
+    elif not f:
+        L.append("     (나) 윈도우 방화벽 허용    : ★없습니다 — 폰이 두드려도 윈도우가 막습니다")
+        막힌것.append("방화벽에 이 프로그램(또는 8899) 허용이 없습니다")
+    else:
+        # ★교집합 판정 — «허용이 듣는 망» 과 «지금 붙어 있는 망» 이 겹치는가
+        겹침 = ("Any" in f) or (not 지금망) or bool(f & 지금망)
+        L.append("     (나) 윈도우 방화벽 허용    : 있습니다 (듣는 망: %s)" % (" · ".join(sorted(f)) or "-"))
+        if 지금망 and not 겹침:
+            L.append("          ※ ★그런데 지금 붙어 있는 망(%s)에서는 그 허용이 안 듣습니다"
+                     % (" · ".join(sorted(지금망))))
+            막힌것.append("허용 규칙이 지금 망에서는 안 듣습니다")
+
+    L.append("")
+    if 막힌것:
+        L.append("  ▣ ★이 컴퓨터 쪽에서 막고 있는 것")
+        for m in 막힌것: L.append("     · " + m)
+        L.append("")
+        L.append("  ▣ 고치는 법 — 프로그램이 대신 고치지 못합니다(윈도우가 관리자 권한을 요구합니다)")
+        try:
+            _bat = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), _PHONE_FIX_BAT)
+        except Exception:
+            _bat = ""
+        if _bat and os.path.exists(_bat):
+            L.append("     · 프로그램 폴더의 「%s」 를" % _PHONE_FIX_BAT)
+            L.append("       ★오른쪽 단추 → «관리자 권한으로 실행» 으로 한 번만 눌러 주세요.")
+            L.append("     · ★그 파일은 ★더하기만 합니다 — 지금 쓰고 계신 설정을 바꾸거나 끄지 않습니다.")
+        else:
+            # ★없는 파일을 찾으라고 시키지 않는다 — 그게 가장 나쁜 거짓말이다
+            L.append("     · [윈도우 검색 → «방화벽을 통해 앱 허용»] 에서 이 프로그램(python)을")
+            L.append("       찾아 체크해 주시면 됩니다. 관리자 권한이 필요합니다.")
+    else:
+        L.append("  ▣ ★이 컴퓨터 쪽에서 막는 것은 안 보입니다.")
+        L.append("     남은 것은 ★공유기와 폰 쪽입니다 — 이 주소를 ★폰에서 한 번 눌러 보십시오.")
+        L.append("     ※ ★«폰에서 열립니다»라고는 말씀드릴 수 없습니다 — 공유기의 «단말 간 차단»,")
+        L.append("       게스트 와이파이, 폰이 LTE·다른 와이파이에 붙어 있는 것, 폰·PC 의 백신 방화벽은")
+        L.append("       ★이 컴퓨터가 원리적으로 볼 수 없습니다.")
+    if 판정불가:
+        L.append("")
+        L.append("  ▣ ★읽지 못한 것 — «괜찮다»가 아니라 «못 봤다»는 뜻입니다")
+        for m in 판정불가: L.append("     · " + m)
+    return L
+
 def _phone_status_lines():
     """지금 상태 + 폰에서 칠 주소를 사람 말로."""
     cur=_C.get("폰비밀번호") if isinstance(_C.get("폰비밀번호"),dict) else None
@@ -4223,14 +5226,14 @@ def _phone_status_lines():
        "  비밀번호 : "+(f"정해져 있습니다 ({cur.get('설정시각','')})" if cur else "아직 정하지 않으셨습니다"),
        "  폰 접속  : "+("켜짐" if on else "꺼짐"),
        "  로그인 유지: "+str(_C.get("폰세션유효일",30))+"일",
-       "  접속 방식  : "+_phone_way()+"   (사설망 = 밖에서도 / 같은 와이파이 = 교회·집 안에서만)",""]
+       "  접속 방식  : "+_phone_way()+"   (사설망 = 밖에서도 / 같은 와이파이 = 그 와이파이에 연결돼 있을 때만)",""]
     if on and cur:
         ip,why,mode=_phone_addr()
         if ip:
             L.append("  ▣ 폰 인터넷 창에 이 주소를 그대로 치세요 (즐겨찾기 해두시면 편합니다)")
             # ★안내문 2벌 — 길마다 «어디서 되는가»가 정반대다. 한 문장으로 쓰면 하나는 거짓이 된다.
             if mode=="wifi":
-                L.append(f"     http://{ip}:8899        ← 같은 와이파이 — ★교회·집의 그 와이파이 안에서만 됩니다")
+                L.append(f"     http://{ip}:8899        ← 같은 와이파이 — ★교회·집의 그 와이파이에 ★연결돼 있을 때만 됩니다")
                 L.append("       (폰이 같은 와이파이에 연결돼 있어야 합니다. 따로 설치하실 것은 없습니다.)")
             else:
                 L.append(f"     http://{ip}:8899        ← 사설망 — 어디서나(밖에서도) 됩니다")
@@ -4258,10 +5261,12 @@ def _phone_status_lines():
             L.append("")
             L.append("  ▸ 폰에서 이 주소가 안 열린다면")
             L.append("     ① 폰이 사설망(VPN)에 연결돼 있는지 먼저 보세요(폰에서도 켜져 있어야 합니다).")
-            L.append("     ② 그래도 안 되면 ★윈도우 방화벽입니다 — 처음 켤 때 뜬 '허용' 창에서")
-            L.append("        '취소'를 누르셨으면 폰 쪽만 막힙니다.")
-            L.append("        [윈도우 검색 → '방화벽을 통해 앱 허용'] 에서 python 항목의 '개인'에 체크해 주세요.")
-            L.append("     ③ 주소는 위 한 줄 그대로, http:// 부터 :8899 까지 다 넣으셔야 합니다.")
+            L.append("     ② 주소는 위 한 줄 그대로, http:// 부터 :8899 까지 다 넣으셔야 합니다.")
+            # ★종전에는 여기서 «방화벽 허용 창에서 취소를 누르셨으면…» 이라고 ★글로만 안내했다.
+            #   그 창은 ★서버 첫 기동 때만 잠깐 뜨고 놓치면 다시 안 뜬다 — 목사님이 확인하실 길이 없었다.
+            #   ⇒ ★추측 안내를 지우고 ★아래에서 실제로 재서 보여 준다(master 판정 2026-08-28).
+    # ★진단 3축은 ★항상 보여 드린다 — 주소가 안 나오는 경우에도 원인이 여기 있을 수 있다.
+    L.extend(_phone_diag_lines())
     return L
 
 def phone_setup(a):
@@ -4285,6 +5290,14 @@ def phone_setup(a):
             print("⚠ 두 번 넣으신 비밀번호가 서로 다릅니다. 다시 한 번 넣어 주세요."); return
         if pw.lower() in ("123456","000000","111111","abcdef","qwerty","password","aaaaaa"):
             print("⚠ 너무 흔한 비밀번호입니다 — 다른 것으로 정해 주세요."); return
+        # ★바꾸기 «전에» 먼저 말씀드린다 — 종전에는 바꾼 ★뒤에야 «모두 끊겼습니다»라고 알렸다.
+        #   그러면 목사님은 심방 나가셔서 폰이 안 열릴 때 비로소 아신다. 겪고 나서 아는 것은 안내가 아니다.
+        #   ★«지금 연결된 폰이 몇 대인가»는 여기서 세지 않는다 — 유효 판정 규칙(만료·세대·무효화 시각)이
+        #     church_web.py 에 있고, 그 규칙을 여기 또 적으면 언젠가 두 벌이 갈라진다(이 파일 5260행의 같은 경고).
+        if cur:
+            print("⚠ 이 비밀번호를 바꾸시면 ★지금 폰에서 열어 두신 것이 모두 끊깁니다 —")
+            print("   폰마다 ★한 번씩 새 비밀번호를 넣어 다시 들어오셔야 합니다.")
+            print("   (폰을 잃어버리셨을 때 이 한 번으로 전부 막으시라고 이렇게 해 두었습니다.)")
         if not _cfg_set("폰비밀번호", _phone_hash(pw)):
             print("⚠ 설정을 저장하지 못했습니다. 잠시 뒤 다시 해보세요."); return
         # ★비밀번호를 바꾸면 그 순간부터 이전 로그인은 전부 무효다.
@@ -4476,6 +5489,8 @@ def menu(a):
         print(f"\n══════ {CHURCH} 교회 종합행정 ══════")
         upd=_check_update()
         if upd: _update_alarm(upd)
+        # ★지난 업데이트가 끝까지 못 갔으면 ★맨 먼저 알린다 — 반쯤 바뀐 프로그램을 모르고 쓰시면 안 된다.
+        if _upd_unfinished(): _upd_unfinished_note(); print()
         _backup_nudge()
         print("  1 교인등록    2 심방브리핑   3 심방기록    4 증명서발급")
         print("  5 주보만들기  6 오늘의묵상   7 생일자확인  8 찬양콘티")
@@ -4484,12 +5499,13 @@ def menu(a):
         print(" 17 설교이력   18 설교작성    19 지난설교 재생성")
         print(" 20 기능요청   21 교인 일괄등록(엑셀 명단)   22 재정 엑셀 가져오기")
         print(" 23 📱 폰 접속 설정 (핸드폰으로 보기)")
-        print(" 77 피닉스복구  88 자료백업   99 업데이트")
+        print(" 77 피닉스복구(교인·재정 자료)   78 업데이트 되돌리기(프로그램)")
+        print(" 88 자료백업   99 업데이트")
         print("  0 종료")
         c=ask("번호 선택> ")
         try:
             if c=="0": print("종료합니다. 샬롬 🙏"); break
-            elif c=="1": member_add(NS(name=ask("이름: "),role=ask("직분: "),cell=ask("소속셀: "),tel=ask("연락처: "),birth=ask("생년월일(YYYY-MM-DD): "),sex="",addr="",baptism="",leader="",memo="",date=""))
+            elif c=="1": member_add(NS(name=ask("이름: "),role=ask("직분: "),cell=ask("구역(셀): "),tel=ask("연락처: "),birth=ask("생년월일(YYYY-MM-DD): "),sex="",addr="",baptism="",baptismdate="",wedding="",cycle="",leader="",memo="",date=""))
             elif c=="2": visit_brief(NS(name=ask("교인 이름: ")))
             elif c=="3": visit_add(NS(name=ask("이름: "),word=ask("전한 말씀: "),prayer=ask("기도제목(;로 구분): "),note=ask("나눈 내용: "),followup=ask("후속조치: "),kind="",by="",date=""))
             elif c=="4": cert(NS(name=ask("이름: "),kind=ask("종류(교인/세례/헌금): "),purpose=ask("용도: "),no=""))
@@ -4505,7 +5521,7 @@ def menu(a):
             elif c=="14": student_add(NS(name=ask("이름: "),school=ask("학교: "),grade=ask("학년: "),dept=(ask("부서(중등부/고등부/청년부): ") or ""),tel=ask("연락처: "),guardian=ask("보호자: "),gtel=ask("보호자연락처: "),major="",sex="",birth=ask("생일(YYYY-MM-DD): "),addr="",leader="",memo="",date=""))
             elif c=="15": exam_cheer(NS(exam=(ask("시험명(예 중간고사): ") or "시험"),dept=(ask("부서(전체는 엔터): ") or "")))
             elif c=="16": mission_plan(NS(title=(ask("선교 팀명: ") or "단기선교"),dday=ask("출국일(YYYY-MM-DD, 모르면 엔터): ")))
-            elif c=="17": sermon_list(NS(query=ask("설교 검색어(본문/제목, 전체는 엔터): "),text="",year=""))
+            elif c=="17": sermon_list(NS(query=ask("설교 검색어(본문/제목, 전체는 엔터): "),text="",year="",service=""))
             elif c=="18": sermon(NS(title=ask("설교 제목: "),text=ask("본문(예 요3:16): "),service=(ask("예배유형(새벽/수요/목요집회/금요/주일오전/주일오후/중고등부/초등부): ") or "주일오전예배"),theme=ask("주제(키워드): "),points=ask("대지(;로 구분, 모르면 엔터): "),series=ask("시리즈(없으면 엔터): "),date=""))
             elif c=="19": sermon_reuse(NS(query=ask("지난 설교 검색(본문/제목): "),title="",text="",theme="",service="",date=""))
             elif c=="20": request(NS(text=ask("원하는 기능을 적어주세요: ")))
@@ -4525,6 +5541,19 @@ def menu(a):
                 print("  ※ 그냥 엔터만 누르시면 지금 상태와 폰에서 칠 주소를 보여 드립니다.")
                 phone_setup(NS(pw=ask("새 비밀번호(6자 이상 · 그대로 두려면 엔터): "),pw2="",
                                on=ask("폰 접속 (켜기/끄기 · 그대로 두려면 엔터): "),logoutall=""))
+            elif c=="77":
+                # ★메뉴에는 77 이 적혀 있는데 ★핸들러가 없어 누르면 «없는 번호입니다»가 떴다(2026-08-29 수리).
+                #   ★78 은 되고 77 은 안 되는 상태로 나가면 목사님이 더 혼란스러우시다.
+                print("  ※ 교인·심방·재정 ★자료를 지난 시점으로 되살립니다(★프로그램 파일을 되돌리시려면 78입니다).")
+                print("  ※ 그냥 엔터만 누르시면 ★되살릴 수 있는 시점 목록만 보여 드리고 아무것도 바꾸지 않습니다.")
+                _ph_when=ask("되살릴 시점(목록만 보시려면 엔터 · 가장 최근이면 last): ")
+                phoenix(NS(restore=_ph_when, last=""))
+            elif c=="78":
+                print("  ※ 업데이트로 바뀐 ★프로그램 파일을 업데이트 직전으로 되돌립니다.")
+                print("  ※ 교인·심방·재정 자료는 ★건드리지 않습니다(자료를 되살리시려면 77 피닉스복구입니다).")
+                print("  ※ 그냥 엔터만 누르시면 ★무엇을 되돌리는지 보여만 드리고 아무것도 바꾸지 않습니다.")
+                update_undo(NS(stamp=ask("시점(가장 최근으로 되돌리시려면 엔터): "),
+                               apply=(ask("실제로 되돌릴까요? (보기만=엔터 / 되돌리기=1): ") or "")))
             elif c=="88": backup(NS())
             elif c=="99":
                 if upd: update(NS(file=upd[1])); print("  ✅ 업데이트 완료! 교인·설교 등 자료는 영구 보존되었습니다. 프로그램을 다시 실행하세요.")
@@ -4534,7 +5563,29 @@ def menu(a):
             # ★영문 오류를 그대로 내보이지 않는다 — 목사님이 당황하신다.
             #   무엇을 하시면 되는지만 한국어로 알려 드리고, 원문은 파일로 남긴다.
             _menu_error(c, e)
-VERSION="2026-08-27 (★폰 접속이 두 갈래가 되었습니다 — ①「같은 와이파이」로 여시면 교회·집의 그 와이파이 안에서 따로 설치하실 것 없이 바로 열리고, ②「사설망」으로 여시면 심방 길·이동 중 밖에서도 열립니다. 「📱 폰 접속 설정」의 '접속 방식' 칸에서 고르십니다 — 비워 두시면 지금 쓰시던 방식 그대로입니다. 화면과 카드에 ★어느 길로 열렸는지·어디서 되는지를 나눠 적어 드립니다) / 함께 고친 것: 엑셀 관리대장·찬양 가사 PPT가 안 될 때 아무 말 없이 멈추던 것을 ★무엇이 없어서인지 한국어로 알려 드리도록 · 한글(.hwp) 변환이 열려 있는 한글 창을 예고 없이 닫던 것을 ★열려 있으면 시작하지 않고 먼저 알려 드리도록 · 시작 아이콘이 컴퓨터의 파이썬을 모두 끄던 것을 ★이 프로그램 것만 정리하도록 / 이전(08-17): 핸드폰에서도 그대로 쓰실 수 있습니다 / 이전(08-04): 새가족 등록에 이름 확인 / 이전(08-01): 바탕화면 아이콘 자동 생성·오류 한국어 안내"
+# ★VERSION 은 ★날짜만 담는다 (2026-08-27 수리).
+#   ★왜 갈랐나: 종전에는 이 한 줄에 날짜와 변경내역 전문이 함께 들어 있었다. 그런데
+#     church_web.py 의 `_engine_ver()` 가 이 값을 그대로 읽어 ★화면 맨 아래 «버전 v…» 에 찍는다.
+#     그래서 목사님 화면 하단에 ★문단이 통째로 나왔다. 매뉴얼 파일 이름에도 이 값이 들어간다
+#     (sanit() 이 50자에서 자르지만, 잘린 문장이 파일 이름이 되는 것도 좋은 모양은 아니다).
+#   ★비교는 원래 날짜로만 한다(`_ver_date`) — 날짜만 남겨도 업데이트 판정은 그대로다.
+#     오히려 «비교에 쓰는 값»과 «보여 주는 값»이 갈려서 정합이 좋아진다.
+#   ★발행 스크립트·설치본 ZIP 은 이미 `.split(" ")[0]` 으로 날짜만 쓰고 있었다(전수 확인함) —
+#     그러니 이 변경으로 그쪽이 깨지지 않는다.
+VERSION="2026-10-23"
+
+# ★이번 판에서 무엇이 좋아졌는지 — 안내문·업데이트 팝업·발행 notes 가 쓰는 값.
+#   ★기능 이름이 아니라 «목사님께 무엇이 좋아지는가»로 적는다.
+VERSION_NOTE="★이번 판에서 새로 들어간 것과 고친 것은 ★함께 드리는 «업데이트 안내문»에 적어 두었습니다 — 무엇이 달라졌는지 그 문서에서 보십시오 / 이전(08-27): 폰 접속이 두 갈래가 되었습니다 — ①「같은 와이파이」로 여시면 교회·집의 그 와이파이 안에서 따로 설치하실 것 없이 바로 열리고, ②「사설망」으로 여시면 심방 길·이동 중 밖에서도 열립니다. 「📱 폰 접속 설정」의 '접속 방식' 칸에서 고르십니다 / 이전(08-27): 엑셀 관리대장·찬양 가사 PPT가 안 될 때 아무 말 없이 멈추던 것을 ★무엇이 없어서인지 한국어로 알려 드리도록 · 한글(.hwp) 변환이 열려 있는 한글 창을 예고 없이 닫던 것을 ★열려 있으면 시작하지 않고 먼저 알려 드리도록 · 시작 아이콘이 컴퓨터의 파이썬을 모두 끄던 것을 ★이 프로그램 것만 정리하도록 / 이전(08-17): 핸드폰에서도 그대로 쓰실 수 있습니다 / 이전(08-04): 새가족 등록에 이름 확인 / 이전(08-01): 바탕화면 아이콘 자동 생성·오류 한국어 안내"
+
+
+# ★매뉴얼 판(版) — 「사용 설명서」 본문을 ★사람이 고칠 때마다 이 날짜를 올린다.
+#   ★왜 따로 두나 (2026-08-27 · 오너 지시): 목사님이 «내가 보는 설명서가 지금 프로그램 것인가»를
+#     스스로 아셔야 하기 때문이다. VERSION 하나만 있으면 설명서가 낡아도 알 길이 없다.
+#   ★이 날짜가 VERSION 날짜보다 오래되면 설명서 첫 장에 경고가 뜨고, 발행 게이트가 ★막는다
+#     (`_매뉴얼정합검사(이 프로그램).py`). 규칙만 적어 두면 또 놓치기 때문에 기계가 집행한다.
+MANUAL_VER="2026-10-23"
+
 # ★업데이트 발행 주소(깃허브 raw). 발행 스크립트가 목사님 계정으로 자동 채웁니다.
 # 예) https://raw.githubusercontent.com/사용자명/저장소명/main/   ← 끝에 / 포함. 비어있으면 설정(업데이트기준URL) 또는 _업데이트 폴더 사용.
 _UPDATE_BASE_DEFAULT="https://raw.githubusercontent.com/welikewon/church-admin/main/"
@@ -4573,6 +5624,12 @@ def _check_update():
     return res
 def version(a):
     print(f"■ {CHURCH} 교회 종합행정시스템 · 엔진 church.py v{VERSION}")
+    print(f"   매뉴얼 판 {MANUAL_VER}" + ("  ⚠ 프로그램이 매뉴얼보다 새 것입니다 — 「사용 설명서 만들기」를 다시 눌러 주세요."
+                                          if _ver_date(MANUAL_VER) < _ver_date(VERSION) else ""))
+    if VERSION_NOTE:
+        print("   ■ 이번 판에서 좋아진 것")
+        for _seg in [s.strip() for s in VERSION_NOTE.split(" / ") if s.strip()]:
+            print("     · "+_seg)
     up=_check_update()
     if up and up[1]: print(f"  🔔 새 업데이트 v{up[0]} 있음! →  python church.py update --file \"{up[1]}\"")
     elif up:         print(f"  🔔 새 업데이트 v{up[0]} 있음! →  번호 메뉴 99번(또는 화면의 '업데이트' 버튼)")
@@ -4634,6 +5691,87 @@ def _ver_date(s):
     """버전 문자열에서 YYYY-MM-DD 추출(비교용). 없으면 (0,0,0)."""
     m=re.search(r'(\d{4})-(\d{2})-(\d{2})', str(s))
     return tuple(int(x) for x in m.groups()) if m else (0,0,0)
+
+# ───────── 업데이트 안전장치 (2026-08-29 · 코덱스 BLOCK/HIGH/MED + 리뷰어1 실측) ─────────
+# ★왜 이것이 필요한가 — 종전 update() 는 ①되돌릴 길이 없고 ②조용히 덮고 ③끝났는지 몰랐다.
+#   ㉮ 이전본을 _업데이트백업/<시각> 에 ★보관은 했는데 ★거기서 꺼내는 명령이 없었다.
+#      («피닉스 복구»는 교인 DB 스냅샷이지 ★프로그램 파일 복구가 아니다 — 이름이 비슷해 더 위험했다)
+#   ㉯ manifest 는 ★설치 루트 기준이라 루트의 .bat·안내문·참고자료도 덮는다. 목사님이 고쳐 두셨어도
+#      ★한 마디 없이 덮였다. 백업은 이미 떴는데 ★말을 안 했을 뿐이다.
+#   ㉰ 파일을 하나씩 순서대로 덮어서, 중간에 끊기면 ★반쯤 바뀐 프로그램이 남고 아무도 몰랐다.
+_UPDMARK=os.path.join(BASE,"_업데이트백업","_진행중.json")
+def _upd_mark_write(d):
+    """★«업데이트를 시작했다»를 디스크에 남긴다. 이 파일이 남아 있으면 = ★끝나지 않았다."""
+    try:
+        os.makedirs(os.path.dirname(_UPDMARK),exist_ok=True)
+        json.dump(d,open(_UPDMARK,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+        return True
+    except Exception:
+        return False
+def _upd_mark_done(d):
+    """끝났으면 ★지우지 않고 «완료» 도장을 그 시점 백업 폴더에 남긴 뒤 진행중 표시만 거둔다.
+       (증거를 지우지 않는다 — «옮긴다»가 이 프로그램의 규약이다)"""
+    try:
+        d=dict(d); d["상태"]="완료"; d["완료시각"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        bd=d.get("백업폴더") or os.path.dirname(_UPDMARK)
+        os.makedirs(bd,exist_ok=True)
+        json.dump(d,open(os.path.join(bd,"_완료.json"),'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+    except Exception: pass
+    try:
+        if os.path.exists(_UPDMARK): os.remove(_UPDMARK)
+    except Exception: pass
+def _upd_unfinished():
+    """지난 업데이트가 끝나지 않았으면 그 기록을 돌려준다. 없으면 None.
+       ★읽지 못해도 None 을 돌려주지 않는다 — 파일이 ★있다는 사실 자체가 신호이기 때문이다."""
+    try:
+        if not os.path.exists(_UPDMARK): return None
+        return json.load(open(_UPDMARK,encoding='utf-8'))
+    except Exception:
+        return {"시작":"","새버전":"","백업폴더":"","완료":"?","총건수":"?","_읽기실패":True}
+def _upd_unfinished_note():
+    """끝나지 않은 업데이트가 있으면 ★알린다. 반쯤 바뀐 프로그램을 조용히 두지 않는다."""
+    u=_upd_unfinished()
+    if not u: return False
+    print("⚠ ★지난 업데이트가 끝까지 가지 못했습니다.")
+    if u.get("시작"):
+        print(f"   · 시작한 때: {u.get('시작','')}   · 바꾸려던 판: {u.get('새버전','') or '(모름)'}")
+    if u.get("총건수") not in (None,""):
+        print(f"   · 바꾼 파일: {u.get('완료','?')} / {u.get('총건수','?')} 개")
+    if u.get("백업폴더"):
+        print(f"   · 그 직전 파일은 여기 그대로 있습니다: {u['백업폴더']}")
+    print("   ▸ 두 가지 중 하나를 하시면 됩니다 —")
+    print("     ① 「업데이트」를 ★한 번 더 누르시면 처음부터 다시 받아 마저 바꿉니다(권장).")
+    print("     ② 「업데이트 되돌리기」로 ★업데이트 전으로 되돌리실 수 있습니다.")
+    print("   ★교인·심방·재정 자료는 이 일과 무관하게 그대로 있습니다.")
+    print("▶실행|update-undo||↩️ 업데이트 되돌리기 — 무엇을 되돌릴지 먼저 보기")
+    return True
+def _upd_backups():
+    """_업데이트백업 안의 «시점 폴더» 목록(오래된 것 → 최신). 되돌리기 전 보관본은 뺀다."""
+    root=os.path.join(BASE,"_업데이트백업")
+    if not os.path.isdir(root): return []
+    out=[]
+    for d in sorted(os.listdir(root)):
+        if not re.match(r'^\d{8}_\d{6}$', d): continue   # «..._되돌리기전» 은 되돌릴 대상이 아니다
+        if os.path.isdir(os.path.join(root,d)): out.append(d)
+    return out
+def _upd_is_protected(rel):
+    """★교인 자료·설정·개인 폴더인가 — 되돌리기가 ★절대 손대면 안 되는 것.
+       ★update() 의 보호 규칙과 ★같은 규칙을 쓴다. 두 곳이 어긋나면 한쪽이 조용히 뚫린다."""
+    reln=str(rel).replace("\\","/").lstrip("/")
+    _bn=os.path.basename(reln).lower()
+    if _bn in {"church_config.json","church_db.json","church_db.json.bak"}: return True
+    if _bn.startswith("church_db.json") or _bn.startswith("church_config.json"): return True
+    _protd={"_내자료","_백업","_업데이트백업",os.path.basename(PHOENIX).lower()}
+    return any(str(x).lower() in _protd for x in reln.split("/"))
+def _upd_backup_files(bdir):
+    """그 시점 폴더에 든 «되돌릴 파일» — (설치루트 기준 상대경로, 백업본 절대경로) 목록."""
+    out=[]
+    for r,_ds,fs in os.walk(bdir):
+        for f in sorted(fs):
+            rel=os.path.relpath(os.path.join(r,f),bdir).replace("\\","/")
+            if rel in ("_완료.json","_되돌리기.json","_진행중.json"): continue   # 우리가 남긴 기록 자체
+            out.append((rel,os.path.join(r,f)))
+    return out
 def update(a):
     """프로그램 업데이트 — 최신 코드·참고자료를 받아 교체(자료는 자동 백업 후 그대로 보존).
        ① --file 지정: 그 church.py로 로컬 교체(구방식).
@@ -4650,6 +5788,9 @@ def update(a):
         print(f"✅ 업데이트 완료 — church.py 교체 (이전 버전은 church.py.{stamp}.old 로 보존)")
         print("  🔒 모든 자료는 그대로 보존되었습니다."); return
     # ── ② 신방식: 매니페스트 기반 온라인/폴더 업데이트 ──
+    #    ★먼저 «지난번이 끝났는가»를 본다. 반쯤 바뀐 채로 또 덮으면 무엇이 어디까지 갔는지 영영 모른다.
+    _unf=_upd_unfinished()
+    if _unf: _upd_unfinished_note(); print()
     base=_C.get("업데이트기준URL") or _C.get("업데이트URL") or _UPDATE_BASE_DEFAULT
     localup=os.path.join(BASE,"_업데이트")
     if not base and os.path.isdir(localup) and os.path.exists(os.path.join(localup,"manifest.json")): base=localup
@@ -4664,8 +5805,18 @@ def update(a):
         print("  (인터넷 연결·업데이트 주소를 확인해 주세요. 자료는 안전합니다.)"); return
     remote_ver=str(man.get("version",""))
     if _ver_date(remote_ver)<=_ver_date(VERSION):
-        print(f"✅ 이미 최신 버전입니다.  (현재 {VERSION})"); return
-    print(f"🔔 새 버전: {remote_ver}   (현재 {VERSION})")
+        # ★★여기가 함정이었다 (2026-08-29 격리 시험에서 ★실제로 재현됨).
+        #   ★도중에 끊기면 church.py 는 ★이미 새 판으로 바뀐 뒤일 수 있다. 그러면 다음에 누르셨을 때
+        #     «이미 최신»이라며 ★아무것도 하지 않고 끝난다 — ★나머지 파일은 옛 판인 채로.
+        #   ★그리고 우리가 화면에 «한 번 더 누르시면 마저 바꿉니다»라고 ★적어 두었다.
+        #     ⇒ 그 말이 ★거짓이 된다. 되는 말만 적기로 했으니, ★말이 아니라 코드를 맞춘다.
+        #   ⇒ 끝나지 않은 업데이트가 있으면 ★판 비교를 건너뛰고 ★같은 판을 다시 받아 마저 바꾼다.
+        if not _unf:
+            print(f"✅ 이미 최신 버전입니다.  (현재 {VERSION})"); return
+        print(f"ℹ 판으로는 이미 최신입니다({VERSION}). ★그러나 지난 업데이트가 끝나지 않았으므로,")
+        print("   ★같은 판을 다시 받아 ★못 바꾼 파일까지 마저 바꿉니다. (자료는 그대로입니다)")
+    else:
+        print(f"🔔 새 버전: {remote_ver}   (현재 {VERSION})")
     if man.get("notes"): print(f"   ✨ 새 기능: {man['notes']}")
     backup(a)  # 자료 먼저 백업
     ROOT=os.path.dirname(BASE); ROOTN=os.path.normpath(ROOT)   # 설치 루트(_시스템의 상위) = manifest 경로 기준
@@ -4677,7 +5828,20 @@ def update(a):
     _protd={x.lower() for x in prot_dirs}
     stamp=datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     bdir=os.path.join(BASE,"_업데이트백업",stamp)
-    ok=0; fail=[]
+    # ══ ★1단계 — 먼저 ★다 받아 놓는다. 이 단계에서는 ★아무것도 바꾸지 않는다. ══
+    #    ★왜 순서를 바꿨나: 종전에는 «받아서 바로 덮기»를 파일마다 반복했다. 그래서 인터넷이
+    #      중간에 끊기면 ★반쯤 바뀐 프로그램이 남았다(코덱스 MED · 주인님 S6 시나리오).
+    #    ★받기는 실패해도 되지만 ★반쯤 바뀌는 것은 안 된다 — 그래서 받기가 다 끝난 뒤에 바꾼다.
+    #    ★한 건이라도 못 받으면 ★한 개도 바꾸지 않는다(비가역 동작은 fail-closed).
+    # ★침묵을 없앤다 (2026-08-29 · 리뷰어1 실측 «원격 15.3초 동안 화면이 조용하다» · master 지시 ㉮).
+    #   ★목사님은 조용하면 «고장났나» 하시고 창을 닫으신다 — ★그 순간이 바로 반쯤 바뀌는 자리다.
+    #   ★그래서 «몇 개 중 몇 개»를 말한다. 진행률은 ★기다리시게 하는 것이 아니라 ★닫지 않으시게 하는 장치다.
+    _tot=len(man.get("files",[]) or [])
+    print(f"  ⏳ 새 파일을 받는 중입니다… (모두 {_tot}개 · 인터넷 속도에 따라 10~30초 걸립니다)")
+    print("     ★이 동안에는 프로그램이 ★아직 하나도 바뀌지 않았습니다 — 다 받은 뒤에 바꿉니다.")
+    sys.stdout.flush()
+    plan=[]; getfail=[]
+    _seen=0
     for rel in man.get("files",[]):
         reln=str(rel).replace("\\","/").lstrip("/")
         segs=reln.split("/")
@@ -4693,21 +5857,92 @@ def update(a):
             continue   # 자료·개인폴더(교인·설정·내자료·백업)는 절대 덮지 않음
         dst=os.path.normpath(os.path.join(ROOT, reln.replace("/",os.sep)))
         if not (dst==ROOTN or dst.startswith(ROOTN+os.sep)):
-            fail.append(reln+"(경로벗어남)"); continue   # 설치 폴더 밖 쓰기 차단(안전)
+            getfail.append(reln+"(경로벗어남)"); continue   # 설치 폴더 밖 쓰기 차단(안전)
         try:
             data=_upd_fetch(base, reln)
-            if not data: fail.append(reln); continue
+        except Exception as e:
+            getfail.append(f"{reln}({str(e)[:30]})"); continue
+        if not data: getfail.append(reln+"(빈 파일)"); continue
+        plan.append((reln,dst,data)); _seen+=1
+        if _tot and (_seen%10==0 or _seen==1):
+            print(f"     … 받는 중 {_seen}개째"); sys.stdout.flush()
+    if getfail:
+        print(f"✗ 새 파일을 받는 중에 {len(getfail)}건이 실패해 ★아무것도 바꾸지 않았습니다.")
+        print(f"   실패: {', '.join(getfail[:6])}" + (f" 외 {len(getfail)-6}건" if len(getfail)>6 else ""))
+        print("   ★프로그램은 지금 그대로입니다 — ★반쯤 바뀐 상태가 되지 않도록, 다 받은 뒤에야 바꿉니다.")
+        print("   인터넷 연결을 확인하시고 잠시 뒤 다시 눌러 주세요. 자료는 안전합니다.")
+        return
+    if not plan:
+        print("ℹ 바꿀 파일이 없습니다. (자료는 그대로입니다)"); return
+    # ══ ★2단계 — ★바꾸기 전에 말한다. ══
+    #    ★프로그램이 «다르다»는 것은 알 수 있지만 «목사님이 고치셨다»는 것은 ★알 수 없다.
+    #      그러니 알 수 없는 것을 아는 척하지 않고, ★아는 것만 말한다: «내용이 다르다 · 옛것은 여기 둔다».
+    #    ★_시스템 안은 프로그램 자신이라 다른 것이 당연하다 — 굳이 세어 놓되 ★따로 말하지 않는다.
+    #      목사님이 손대실 자리는 ★루트의 실행 아이콘(.bat)·안내문(.txt)·참고자료(.md)다.
+    changed=[]; sysdiff=0
+    for reln,dst,data in plan:
+        if not os.path.exists(dst): continue
+        try: cur=open(dst,'rb').read()
+        except Exception: continue
+        if cur==data: continue
+        if reln.startswith("_시스템/"): sysdiff+=1
+        else: changed.append(reln)
+    if changed:
+        print()
+        print(f"  ⚠ ★지금 것과 ★내용이 다른 파일이 {len(changed)}개 있습니다 — 새 것으로 바꿉니다.")
+        print(f"     ★혹시 목사님이 손수 고쳐 두신 것이 있다면, ★옛 것을 그대로 여기에 넣어 둡니다:")
+        print(f"        _업데이트백업\\{stamp}")
+        print("     ★바꾼 뒤에도 그 폴더에서 꺼내실 수 있고, 「업데이트 되돌리기」로 한 번에 되돌리실 수도 있습니다.")
+        for r in changed[:12]: print(f"     · {r}")
+        if len(changed)>12: print(f"     · … 외 {len(changed)-12}개")
+        print()
+    # ══ ★3단계 — 이제 바꾼다. 시작과 끝을 ★기록에 남긴다. ══
+    _mark={"상태":"진행중","시작":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "현재버전":VERSION,"새버전":remote_ver,"설치루트":ROOT,
+           "백업폴더":bdir,"총건수":len(plan),"완료":0}
+    if not _upd_mark_write(_mark):
+        print("  ※ 진행 기록을 남기지 못했습니다 — 바꾸는 일은 그대로 진행하지만,")
+        print("     혹시 도중에 끊기면 다음에 알아채지 못할 수 있습니다.")
+    print(f"  🔁 이제 바꿉니다… ({len(plan)}개 · 옛 것은 _업데이트백업\\{stamp} 에 넣어 두면서 바꿉니다)")
+    sys.stdout.flush()
+    ok=0; fail=[]
+    for reln,dst,data in plan:
+        try:
             if os.path.exists(dst):  # 이전본 백업
                 bp=os.path.join(bdir, os.path.relpath(dst, ROOT)); os.makedirs(os.path.dirname(bp) or bdir,exist_ok=True); shutil.copy2(dst,bp)
             os.makedirs(os.path.dirname(dst) or ROOT, exist_ok=True)
             with open(dst,'wb') as f: f.write(data)
             ok+=1
+            _mark["완료"]=ok; _upd_mark_write(_mark)   # ★어디까지 갔는지 매번 남긴다(끊겨도 알 수 있게)
+            if ok%10==0 or ok==1:
+                print(f"     … 바꾸는 중 {ok}/{len(plan)}개"); sys.stdout.flush()
         except Exception as e:
             fail.append(f"{reln}({str(e)[:30]})")
+    if fail:
+        # ★끝나지 않았다 — 진행중 표시를 ★거두지 않는다. 다음 실행 때 알아채야 한다.
+        _mark["상태"]="일부실패"; _mark["실패"]=fail[:20]; _upd_mark_write(_mark)
+    else:
+        _upd_mark_done(_mark)
     print(f"✅ 업데이트 완료 — {ok}개 파일을 최신으로 교체했습니다. (이전본: _업데이트백업/{stamp})")
-    if fail: print(f"   ⚠ 일부 실패 {len(fail)}건: {', '.join(fail[:6])}")
+    if sysdiff: print(f"   (그중 프로그램 파일 {sysdiff}개가 새 내용으로 바뀌었습니다 — 업데이트란 원래 이것입니다)")
+    if fail:
+        print(f"   ⚠ ★{len(fail)}건을 바꾸지 못해 ★업데이트가 끝나지 않았습니다: {', '.join(fail[:6])}")
+        print("   ★다음에 프로그램을 켜시면 이 사실을 다시 알려 드립니다.")
+        print("   ▸ 「업데이트」를 한 번 더 누르시거나, 「업데이트 되돌리기」로 되돌리실 수 있습니다.")
     print("  🔒 교인·심방·설교·재정·예화·주석·찬양곡 등 모든 자료는 그대로 보존되었습니다.")
-    print("  🔄 프로그램을 껐다 다시 켜시면(시작.bat 더블클릭) 새 기능이 모두 적용됩니다.")
+    # ★마지막에 해야 할 일 ★하나만 남기고 눈에 띄게 세운다 (master 지시 ㉮ 후단).
+    #   ★종전에는 이 줄이 다른 안내 사이에 끼어 ★묻혔다. 목사님이 안 껐다 켜시면
+    #     ★새 기능이 안 보이고 «업데이트가 안 됐다»고 여기신다.
+    print()
+    print("  ┌" + "─"*54 + "┐")
+    print("  │ ★지금 하실 일 한 가지 —                              │")
+    print("  │   프로그램을 ★껐다가 다시 켜 주세요.                    │")
+    print("  │   (바탕화면의 「★ 교회행정 시작」 을 다시 더블클릭)        │")
+    print("  │   그때부터 새 기능이 보입니다.                          │")
+    print("  └" + "─"*54 + "┘")
+    print()
+    print("  ↩️ 새 판이 마음에 안 드시면 ★되돌리실 수 있습니다 — 「업데이트 되돌리기」")
+    print(f"▶실행|update-undo|stamp={stamp}|↩️ 이 업데이트 되돌리기 — 무엇을 되돌릴지 먼저 보기")
 def update_check(a):
     """업데이트 있는지 확인만(적용 안 함) — 웹 상단 '새 업데이트' 표시용. __UPD__{json} 출력."""
     import json as _j
@@ -4722,14 +5957,133 @@ def update_check(a):
             if _ver_date(rv)>_ver_date(VERSION):
                 out={"new":True,"version":rv,"notes":man.get("notes","")}
         except Exception: pass
+    _u=_upd_unfinished()
+    if _u: out["unfinished"]=True; out["unfinished_at"]=_u.get("시작","")
     print("__UPD__"+_j.dumps(out,ensure_ascii=False))
+def update_undo(a):
+    """↩️ 업데이트 되돌리기 — 지난 업데이트 ★직전의 프로그램 파일로 되돌립니다.
+
+       ★건드리지 않는 것: 교인·심방·재정 자료(church_db.json) · 설정 · _내자료 · _백업 · 피닉스.
+         ★프로그램 코드와 안내문만 되돌립니다 — 그래서 되돌려도 ★교인 한 분도 사라지지 않습니다.
+       ★비우고 실행하시면 «무엇을 언제로 되돌리는지»만 보여 드리고 ★아무것도 바꾸지 않습니다.
+       ★실제로 되돌릴 때는 ★지금 상태를 먼저 보관합니다 — 되돌린 뒤 ★다시 앞으로 오실 수 있습니다."""
+    import shutil
+    ROOT=os.path.dirname(BASE); ROOTN=os.path.normpath(ROOT)
+    root=os.path.join(BASE,"_업데이트백업")
+    print("■ ↩️ 업데이트 되돌리기")
+    if _upd_unfinished(): print(); _upd_unfinished_note(); print()
+    stamps=_upd_backups()
+    if not stamps:
+        print("  되돌릴 수 있는 시점이 아직 없습니다.")
+        print("  · 업데이트를 아직 한 번도 하지 않으셨거나,")
+        print(f"  · 이전본 폴더가 비어 있습니다: {root}")
+        print("  ※ 업데이트를 하시면 그 ★직전 파일이 자동으로 이 폴더에 보관되고, 그때부터 되돌리실 수 있습니다.")
+        print("  ※ 교인·재정 자료를 되살리시려면 이 카드가 아니라 「🔥 피닉스 복구」입니다 — 서로 다른 것입니다.")
+        return
+    want=(getattr(a,'stamp','') or "").strip()
+    if want:
+        target=next((s for s in reversed(stamps) if want in s), None)
+        if not target:
+            print(f"  ✗ '{want}' 에 해당하는 시점이 없습니다. 아래에서 골라 주세요.")
+            for s in list(reversed(stamps))[:12]: print(f"     · {s}")
+            return
+    else:
+        target=stamps[-1]   # 비우면 ★가장 최근 업데이트 직전으로
+    bdir=os.path.join(root,target)
+    allitems=_upd_backup_files(bdir)
+    # ★보호 대상은 애초에 백업에 들어가지 않지만, ★되돌릴 때 ★다시 거른다.
+    #   «그럴 리 없다»로 두면 언젠가 그 «그럴 리»가 교인 명부를 덮는다.
+    prot=[r for r,_p in allitems if _upd_is_protected(r)]
+    items=[(r,p) for r,p in allitems if not _upd_is_protected(r)]
+    oldver=""
+    for r,p in items:
+        if r.lower()=="_시스템/church.py":
+            try:
+                _m=re.search(r'^VERSION\s*=\s*"([^"]+)"', open(p,encoding='utf-8',errors='replace').read(), re.M)
+                if _m: oldver=_m.group(1)
+            except Exception: pass
+    if not items:
+        print(f"  {target} 시점 폴더에 되돌릴 프로그램 파일이 없습니다.")
+        if prot: print(f"  (자료 파일 {len(prot)}개가 있었지만 ★되돌리기 대상이 아닙니다 — 자료는 건드리지 않습니다)")
+        return
+    _t=f"{target[:4]}-{target[4:6]}-{target[6:8]} {target[9:11]}:{target[11:13]}"
+    print(f"  ★되돌릴 시점 : {_t} 의 업데이트 ★직전   (폴더 {target})")
+    print(f"  ★바꿀 파일   : {len(items)}개")
+    print(f"  ★지금 판     : {VERSION}" + (f"   →   되돌아갈 판: {oldver}" if oldver else "   →   되돌아갈 판: (표시 없음)"))
+    print( "  ★안 건드리는 것 : 교인·심방·재정 자료 · 설정 · _내자료 · _백업 · 피닉스")
+    if prot:
+        print(f"     (이전본 폴더 안의 자료 파일 {len(prot)}개는 되돌리기에서 ★뺐습니다)")
+    print("  ─"*24)
+    for r,_p in items[:20]: print(f"     · {r}")
+    if len(items)>20: print(f"     · … 외 {len(items)-20}개")
+    print("  ─"*24)
+    _ap=str(getattr(a,'apply','') or "").strip().lower()
+    if _ap not in ("1","y","yes","예","네","true","on"):
+        print("  ※ ★지금은 «무엇을 되돌리는지»만 보여 드렸습니다 — ★아무것도 바뀌지 않았습니다.")
+        print("  ▶ 실제로 되돌리시려면 '실제로 되돌리기' 칸에 ★1 을 넣고 다시 실행해 주세요.")
+        print("     (되돌리기 ★직전에 지금 상태도 함께 보관하므로, 되돌린 뒤 ★다시 앞으로 오실 수 있습니다)")
+        print(f"▶실행|update-undo|stamp={target},apply=1|↩️ {_t} 직전으로 ★실제로 되돌리기")
+        return
+    # ── ★㉮ 되돌리기의 되돌리기 — 지금 상태를 먼저 보관한다. 보관에 실패하면 ★시작하지 않는다. ──
+    now=datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    keep=os.path.join(root,now+"_되돌리기전"); kept=0
+    try:
+        for r,_p in items:
+            cur=os.path.normpath(os.path.join(ROOT, r.replace("/",os.sep)))
+            if not os.path.exists(cur): continue
+            kp=os.path.join(keep, r.replace("/",os.sep))
+            os.makedirs(os.path.dirname(kp) or keep,exist_ok=True)
+            shutil.copy2(cur,kp); kept+=1
+    except Exception as e:
+        print(f"  ✗ 되돌리기 직전 상태를 보관하지 못했습니다({type(e).__name__}) — ★안전을 위해 중단합니다.")
+        print("     ★프로그램은 그대로입니다. 아무것도 바뀌지 않았습니다.")
+        return
+    print(f"  (되돌리기 직전 상태 {kept}개를 _업데이트백업\\{now}_되돌리기전 에 보관했습니다)")
+    ok=0; bad=[]
+    for r,p in items:
+        dst=os.path.normpath(os.path.join(ROOT, r.replace("/",os.sep)))
+        if not (dst==ROOTN or dst.startswith(ROOTN+os.sep)):
+            bad.append(r+"(경로벗어남)"); continue   # 설치 폴더 밖 쓰기 차단(안전)
+        try:
+            os.makedirs(os.path.dirname(dst) or ROOT,exist_ok=True)
+            shutil.copy2(p,dst); ok+=1
+        except Exception as e:
+            bad.append(f"{r}({str(e)[:30]})")
+    try:   # 무엇을 되돌렸는지 그 폴더에 남긴다(증거)
+        json.dump({"되돌린시각":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "되돌린시점":target,"되돌리기전보관":keep,"되돌린판":VERSION,"되돌아간판":oldver,
+                   "성공":ok,"실패":bad[:20]},
+                  open(os.path.join(keep,"_되돌리기.json"),'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+    except Exception: pass
+    _u=_upd_unfinished()
+    if _u:   # 끝나지 않았던 업데이트를 되돌렸으니 그 표시를 거둔다(옮겨 남긴다 · 지우지 않는다)
+        try:
+            _u["상태"]="되돌림"; _u["되돌린시각"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            json.dump(_u,open(os.path.join(keep,"_되돌린_진행중기록.json"),'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+        except Exception: pass
+        try:
+            if os.path.exists(_UPDMARK): os.remove(_UPDMARK)
+        except Exception: pass
+        print("  · 끝나지 않았던 업데이트 표시를 거두었습니다(기록은 위 보관 폴더에 남겼습니다).")
+    print(f"✅ 되돌리기 완료 — {ok}개 파일을 {_t} 직전으로 되돌렸습니다.")
+    if bad: print(f"   ⚠ {len(bad)}건 실패: {', '.join(bad[:6])}")
+    print("  🔒 교인·심방·재정 자료와 설정·_내자료는 ★건드리지 않았습니다.")
+    print("  🔄 프로그램을 껐다 다시 켜 주세요(시작.bat 더블클릭) — 그때부터 되돌린 판으로 돕니다.")
+    print("  ↪️ 다시 새 판으로 오시려면 「업데이트」를 누르시면 됩니다.")
 def phoenix(a):
     """🔥 피닉스 복구 — 삭제·손상된 자료를 지난 시점으로 되살립니다. 자료는 결코 사라지지 않습니다."""
     import shutil
     os.makedirs(PHOENIX,exist_ok=True)
     snaps=sorted(f for f in os.listdir(PHOENIX) if f.startswith("db_") and f.endswith(".json"))
-    if a.restore or a.last:
-        if a.last or (a.restore or "").lower()=="last":
+    # ★«--last» 는 두 가지 모양으로 들어온다 — CLI 는 값 없이(«--last»), 화면 카드는 값과 함께(«--last 1»).
+    #   ★종전에는 값을 못 받는 스위치라 ★화면에서 1 을 넣으시면 파서가 죽어 ★복구가 아예 안 됐다
+    #     (2026-08-29 실측: «unrecognized arguments: 1»). 기능은 있는데 ★목사님 손으로는 못 닿았다.
+    #   ★그리고 문자열로 받으면 «0»·«아니오» 도 «값이 있다»가 되어 ★안 하려던 복구가 돌아간다 —
+    #     그래서 «켬»으로 읽을 말을 ★정해 두고, 그 밖은 ★복구하지 않는다(비가역 동작은 fail-closed).
+    _last_raw=str(getattr(a,'last','') or "").strip().lower()
+    _last_on = _last_raw in ("1","y","yes","예","네","true","on","last")
+    if a.restore or _last_on:
+        if _last_on or (a.restore or "").lower()=="last":
             target=snaps[-1] if snaps else None
         else:
             target=next((s for s in reversed(snaps) if a.restore in s), None)
@@ -4860,10 +6214,11 @@ def dashboard(a):
     for m in mem:
         H=m.get("심방이력",[]); last=_d(H[-1].get("날짜")) if H else None
         if last is None or (td-last).days>=90: care_names.append(m.get("이름",""))
-    newf=0
-    for m in mem:
-        rd=_d(m.get("등록일",""))
-        if m.get("상태")=="새가족" or (rd and 0<=(td-rd).days<=90): newf+=1
+    # ★새가족 수 — 등록일로 ★추정하지 않는다(2026-08-27 수리).
+    #   종전: 상태가 «새가족»이거나 ★등록일이 90일 이내면 새가족으로 셌다.
+    #   그래서 처음 설치하고 기존 교인을 넣으신 날 ★전원이 새가족으로 떴다 —
+    #   목사님이 화면에서 가장 먼저 보시는 숫자가 거짓말을 하고 있었다.
+    newf=sum(1 for m in mem if _is_newfamily(m))
     wk=["월","화","수","목","금","토","일"][td.weekday()]
     out={"교인":n_mem,"이번주심방":n_visit,"이번달헌금":offering,"돌봄필요":len(care_names),
          "돌봄명단":care_names[:4],"새가족":newf,"연월":ym,"오늘":td.isoformat(),"요일":wk,
@@ -4947,8 +6302,8 @@ def harvest_plan(a):
         head=("D-DAY" if off==0 else (f"D{off}" if off<0 else f"D+{off}"))+ds
         para(d,f"{head} · {title}",13,RGBColor(0x2F,0x7D,0x5B),True,before=8,after=3,font=SANS)
         for it in items: para(d,f"  ☐  {it}",11,after=2)
-    para(d,"※ 초청카드에 '초청자(이름·셀)'를 함께 적어, 초청자별로 태신자를 추적하고 정착까지 책임지게 하는 것이 태신자 운동의 핵심입니다.",9.5,LG,before=10,font=SANS)
-    out=os.path.join(CAT("04"),f"[새생명축제 준비타임라인] {sanit(a.title or '새생명초청잔치')}_{today()}.docx"); _savedoc(d,out)
+    para(d,"※ 초청카드에 '초청자(이름·구역(셀))'를 함께 적어, 초청자별로 태신자를 추적하고 정착까지 책임지게 하는 것이 태신자 운동의 핵심입니다.",9.5,LG,before=10,font=SANS)
+    out=os.path.join(CAT("04"),f"[새생명축제 준비타임라인] {sanit(a.title or '새생명초청잔치')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 새생명축제 준비 타임라인: {out}"+(f" (축제일 {a.dday} 기준 날짜 계산)" if dd else " (--dday 축제일 넣으면 날짜 자동계산)"))
 def harvest_checklist(a):
     """🌾 새생명축제 당일 진행 체크리스트 — 시간대·역할별 당일 운영 점검표."""
@@ -4964,28 +6319,28 @@ def harvest_checklist(a):
     for t,items in blocks:
         para(d,f"■ {t}",13,MAROON,True,before=8,after=3,font=SANS)
         for it in items: para(d,f"  ☐  {it}",11,after=2)
-    out=os.path.join(CAT("04"),f"[새생명축제 당일체크리스트] {sanit(a.title or '새생명초청잔치')}_{a.date or today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("04"),f"[새생명축제 당일체크리스트] {sanit(a.title or '새생명초청잔치')}_{a.date or today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 새생명축제 당일 체크리스트: {out}")
 def cell_worship(a):
-    """🏠 구역·속회 예배 순서지 — 찬송·기도·말씀 나눔·삶 나눔·중보 (인도용 교안 겸용). 구역장 출력용."""
+    """🏠 구역(셀)·속회 예배 순서지 — 찬송·기도·말씀 나눔·삶 나눔·중보 (인도용 교안 겸용). 구역장 출력용."""
     d=newdoc()
-    para(d,f"{CHURCH} · 구역·속회 예배",11,GOLD,True,AL.CENTER,after=0,font=SANS)
-    para(d,a.title or "구역·속회 예배 순서",20,NAVY,True,AL.CENTER,before=4,after=2,font=SANS); hr(d,"1E6E6A",12)
+    para(d,f"{CHURCH} · 구역(셀)·속회 예배",11,GOLD,True,AL.CENTER,after=0,font=SANS)
+    para(d,a.title or "구역(셀)·속회 예배 순서",20,NAVY,True,AL.CENTER,before=4,after=2,font=SANS); hr(d,"1E6E6A",12)
     para(d,f"{a.date or today()}  ·  인도 {a.leader or '구역장'}  ·  본문 {a.text or ''}",10,GRAY,AL.CENTER,after=8,font=SANS)
     steps=[("묵도·부름","다 함께 마음을 모아 주님 앞에 나아갑니다"),("찬송","____장 (다 함께)"),("대표 기도","____ (한 분)"),
            ("성경 봉독",a.text or "____________ (다 함께)"),("말씀 나눔","오늘 본문에서 받은 은혜를 나눕니다"),
            ("삶 나눔·교제","한 주간의 삶·감사 제목을 나눕니다"),("중보 기도","나눈 기도제목으로 서로 위해 기도"),
-           ("광고·교제","구역 소식·다음 모임 안내 · 다과"),("주기도문","다 함께")]
+           ("광고·교제","구역(셀) 소식·다음 모임 안내 · 다과"),("주기도문","다 함께")]
     for i,(t,desc) in enumerate(steps,1):
         para(d,f"{i}. {t}",13,NAVY,True,before=6,after=1,font=SANS); para(d,f"   {desc}",10.5,LG,after=2)
     para(d,"■ 말씀 나눔 질문",12,MAROON,True,before=10,after=3,font=SANS)
     for q in ["이 말씀에서 하나님은 어떤 분으로 나타나시나요?","내 삶에 적용할 한 가지는 무엇인가요?","이번 주 함께 기도·실천할 제목은?"]:
         para(d,f"· {q}",10.5,after=2)
-    para(d,"■ 우리 구역 기도제목",12,MAROON,True,before=8,after=3,font=SANS)
+    para(d,"■ 우리 구역(셀) 기도제목",12,MAROON,True,before=8,after=3,font=SANS)
     para(d,"________________________________________________________",10.5,LG,after=2)
     para(d,"________________________________________________________",10.5,LG,after=2)
-    out=os.path.join(CAT("04"),f"[구역예배] {sanit(a.title or '순서')}_{a.date or today()}.docx"); _savedoc(d,out)
-    print(f"✅ 구역·속회 예배 순서지: {out}")
+    out=os.path.join(CAT("04"),f"[구역(셀)예배] {sanit(a.title or '순서')}_{a.date or today()}.docx"); out=_savedoc(d,out) or out
+    print(f"✅ 구역(셀)·속회 예배 순서지: {out}")
 def member_transfer(a):
     """↔ 교적 이동(전입·전출·이명) — 이름을 넣으면 기록+상태 갱신, 그리고 항상 '교적 이동 대장'을 함께 출력. (이름 비우면 대장만)"""
     db=load(); db.setdefault("교적이동",[])
@@ -5016,7 +6371,7 @@ def transfer_ledger(a):
     for r in sorted(recs,key=lambda x:str(x.get("날짜",""))):
         rows.append([r.get("날짜",""),r.get("종류",""),r.get("이름",""),r.get("상대교회",""),r.get("사유","")])
     _ref_table(d,rows,colored=True)
-    out=os.path.join(CAT("01"),f"[교적이동대장]_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("01"),f"[교적이동대장]_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 교적 이동 대장: {out} ({len(recs)}건)")
 def annual_plan(a):
     """📅 연간 사역 계획표 — 월별 절기·주요 사역 한 장(우리 교회 계획 기입란). 절기는 그 해 교단력 확인."""
@@ -5031,10 +6386,17 @@ def annual_plan(a):
     rows=[["월","주요 절기·사역","우리 교회 계획 (직접 기입)"]]
     for m in range(1,13): rows.append([f"{m}월",seasons.get(m,""),""])
     _ref_table(d,rows,colored=True)
-    para(d,"■ 연간 반복 사역: 주일예배·수요예배·금요기도회·새벽기도 / 심방·구역모임·제직회·당회·공동의회",10,GRAY,before=8,font=SANS)
-    out=os.path.join(CAT("01"),f"[연간사역계획] {sanit(year)}_{today()}.docx"); _savedoc(d,out)
+    para(d,"■ 연간 반복 사역: 주일예배·수요예배·금요기도회·새벽기도 / 심방·구역(셀)모임·제직회·당회·공동의회",10,GRAY,before=8,font=SANS)
+    out=os.path.join(CAT("01"),f"[연간사역계획] {sanit(year)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 연간 사역 계획표: {out}")
 _SAC_KINDS=("유아세례","세례","학습","입교")
+# ★★성찬은 ★여기 넣지 않는다 (master 재정 2026-08-28 · 오너 확정).
+#   이 대장은 «이 사람이 세례교인인가»를 ★증명하는 대장이다(진학용 세례증명의 근거).
+#   성찬은 ★회중이 반복해 받는 것이라 여기 넣으면 한 사람에게 수십 건이 쌓이고,
+#   ★세례·입교가 그 속에 묻혀 증명 근거로서의 쓸모가 떨어진다.
+#   ⇒ 성찬은 ★별도 축(시행 일정 + 준비 안내)으로 둔다. ★개인 대장에 쌓지 마라.
+#   ★그리고 「성찬 교육·과정·수료」라고 쓰지 마라 — 세례·학습·입교는 문답·교육과정이 실재하지만
+#     ★성찬은 정식 교육과정이 아니라 ★준비하고 참여하는 것이다.
 def sacrament_add(a):
     """💧 성례 등록 & 대장 — 이름을 넣으면 유아세례·세례·학습·입교를 성례대장에 기록(증명서 근거), 이름을 비우면 성례대장을 본다."""
     name=(getattr(a,'name','') or '').strip()
@@ -5071,8 +6433,239 @@ def sacrament_ledger(a):
                      r.get("날짜",""),r.get("집례자",""),r.get("비고","")])
     _ref_table(d,rows,colored=True)
     para(d,"※ 이 대장은 세례·학습·입교의 공식 기록이며, 세례교인 증명서 발급의 근거가 됩니다. 원본은 교회가 영구 보존합니다.",9,LG,before=8,font=SANS)
-    out=os.path.join(CAT("02"),f"[성례대장]{('_'+sanit(kf)) if kf else ''}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("02"),f"[성례대장]{('_'+sanit(kf)) if kf else ''}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 성례대장 생성: {out} ({len(recs)}건)")
+def communion(a):
+    """🍞 성찬 준비·안내 — 시행 일정을 적어 두고, 준비하실 것을 한 장으로 챙겨 드립니다.
+
+       ★★«교육»이 아니다 (오너 확정 2026-08-28):
+         세례·학습·입교는 문답과 교육과정이 실재한다. ★성찬은 그렇지 않다 —
+         회중이 ★준비하고 참여하는 것이다. 그래서 이 카드는 «성찬 교육»도 «과정»도 «수료»도 아니다.
+       ★★개인 대장에 쌓지 않는다: 성례 등록 대장은 «이 사람이 세례교인인가»를 증명하는 자리다.
+         회중이 반복해 받는 성찬을 거기 쌓으면 ★세례·입교가 그 속에 묻힌다.
+       ★★참여자 명단 기능은 ★넣지 않았다 — 신학적으로 목사님이 판단하실 부분이 있어
+         ★여쭙기 전에는 만들지 않는다. 없는 것을 있는 척하지 않고, 왜 없는지를 화면에 적는다."""
+    db=load(); db.setdefault("성찬",[])
+    날짜=(getattr(a,'date','') or "").strip()
+    예배=(getattr(a,'service','') or "").strip() or "주일예배"
+    메모=(getattr(a,'note','') or "").strip()
+
+    if 날짜:
+        기존=next((r for r in db["성찬"] if r.get("날짜")==날짜 and r.get("예배")==예배),None)
+        if 기존:
+            if 메모: 기존["메모"]=메모
+            print(f"✅ 성찬 일정을 고쳤습니다: {날짜} [{예배}]")
+        else:
+            db["성찬"].append({"날짜":날짜,"예배":예배,"메모":메모})
+            print(f"✅ 성찬 일정을 적어 두었습니다: {날짜} [{예배}]")
+        db["성찬"].sort(key=lambda r:r.get("날짜",""),reverse=True); save(db); print("")
+
+    print("■ 🍞 성찬 준비·안내")
+    print("─"*66)
+    일정=db.get("성찬",[])
+    if 일정:
+        오늘=today()
+        앞으로=[r for r in 일정 if r.get("날짜","")>=오늘]
+        지난=[r for r in 일정 if r.get("날짜","")<오늘]
+        print(f"  ▣ 적어 두신 성찬 일정 {len(일정)}회")
+        if 앞으로:
+            print("   · 앞으로:")
+            for r in sorted(앞으로,key=lambda x:x.get("날짜","")):
+                print(f"      {r.get('날짜','')} [{r.get('예배','')}]"
+                      + (f" — {r.get('메모','')}" if r.get("메모") else ""))
+        if 지난:
+            print(f"   · 지난 성찬 {len(지난)}회 (가장 최근 3회)")
+            for r in 지난[:3]:
+                print(f"      {r.get('날짜','')} [{r.get('예배','')}]"
+                      + (f" — {r.get('메모','')}" if r.get("메모") else ""))
+    else:
+        print("  ▣ 아직 적어 두신 성찬 일정이 없습니다.")
+        print("     «시행일» 칸에 날짜를 넣고 실행하시면 적어 둡니다 (예: 2026-09-06).")
+    print("")
+    print("  ▣ 성찬 전에 챙기실 것")
+    print("     ① 떡과 잔을 몇 사람 분으로 준비할지 정합니다 — 지난 주일 출석 수를 참고하시면 편합니다")
+    print("        ('구역(셀)별 52주 출석 체크판'에서 보실 수 있습니다).")
+    print("     ② 배찬하실 분(장로·집사)과 순서를 미리 정해 알려 드립니다.")
+    print("     ③ 성찬 상·기구를 닦아 두고, 덮을 보를 준비합니다.")
+    print("     ④ 거동이 불편해 못 나오시는 분께 따로 가서 나눌지 정합니다"
+          " — 심방 일정과 함께 잡으시면 좋습니다.")
+    print("")
+    print("  ▣ 회중에게 미리 알려 드릴 말씀 (주보·광고용 · 그대로 쓰셔도 됩니다)")
+    print("     「다음 주일 예배 때 성찬을 나눕니다. 성찬은 주님께서 친히 세우신 것이니,")
+    print("      각자 마음을 살펴 준비된 마음으로 나오시기 바랍니다(고린도전서 11:27-29).」")
+    print("     ※ 위 문장은 그대로 복사해 주보에 넣으셔도 됩니다. 고쳐 쓰셔도 됩니다.")
+    print("")
+    print("  ▣ 이 카드가 ★하지 않는 것")
+    print("     · 성찬은 «성례 등록 대장»에 쌓지 않습니다 — 그 대장은 세례·학습·입교처럼")
+    print("       ★한 번 받고 증명서를 떼는 것을 위한 자리라, 매번 받는 성찬을 넣으면")
+    print("       세례 기록이 그 속에 묻히기 때문입니다.")
+    print("     · 참여하신 분 명단을 남기는 기능은 ★아직 넣지 않았습니다 —")
+    print("       목사님께 먼저 여쭙고 정하려고 비워 두었습니다.")
+
+_CLASS_KINDS=("세례","유아세례","학습","입교")
+# ★★성례 «교육»은 성례 «등록 대장»과 ★다른 사건이다 (오너 확정 순서 ①세례 ②유아세례(부모교육)).
+#   대장은 «받았다»는 ★증명이고, 교육은 «받기 전에 준비한다»는 ★과정이다.
+#   ⇒ 교육을 _SAC_KINDS 대장에 넣으면 ★아직 받지 않은 분이 받은 것처럼 섞인다. 별도 축 db["성례교육"].
+# ★★유아세례 교육의 대상은 ★아기가 아니라 ★부모다. 화면 문장도 반드시 그렇게 적는다.
+# ★★수료증은 ★만들지 않는다 — 교육을 인정하는 절차(당회 문답 등)는 교단·교회마다 다르다.
+#   프로그램이 «수료»를 발급하면 ★없는 권위를 만드는 것이다.
+# ★★2026-08-29 보강(오너 지시): 종류를 ★4종(세례·유아세례·학습·입교)으로 넓히고
+#   각 종류를 ★2회분 커리큘럼으로 적는다. 종전에는 한 줄짜리 항목 5개뿐이어서
+#   목사님이 그것만 보고 교육을 여실 수 없었다 — 필요한 것은 «흔히 다루는 것»이 아니라
+#   ★«그날 무엇을 어떤 순서로 하는가»다.
+# ★성경은 ★장절 주소만 적는다(본문 축자 인용 금지 — 역본 동일성유지권).
+# ★«학습»과 «입교»는 ★다른 사건이다 — 학습은 세례 ★전 단계이고,
+#   입교는 ★유아세례를 받은 이가 자라서 ★본인의 고백으로 서는 자리다. 섞어 적으면 더 헷갈리신다.
+#   ★교단에 따라 학습을 두지 않는 곳도 있다 — 화면에 그렇게 적어 고쳐 쓰시게 한다.
+# 자료 모양 = {종류: [(회차 제목, [항목…], 인도자 유의), …]}
+_CLASS_TOPICS={
+ "세례":[
+  ("1회차 · 복음과 세례의 뜻 (약 50분)",[
+   "① 복음 다시 듣기 — 세례는 «내가 잘해서» 받는 상이 아니라, 하나님이 먼저 사랑하셨다는 것에 대한 응답입니다 (요 3:16 · 롬 5:8)",
+   "② 죄와 은혜 — 세례가 «씻는다»고 말하는 그 죄가 무엇인지 함께 확인합니다 (롬 3:23 · 롬 6:23)",
+   "③ ★믿음의 고백이 먼저입니다 — 물이 사람을 바꾸는 것이 아니라, 물이 그 고백을 ★교회 앞에 세웁니다",
+   "④ 세례의 뜻 세 가지 — ㉮죄 씻음 ㉯그리스도와 함께 죽고 함께 삶(롬 6:3~4) ㉰교회의 지체가 됨(고전 12:13)",
+   "⑤ 자주 나오는 물음 — 「다른 교회에서 받았는데 다시 받아야 하나요」 「세례받으면 죄를 안 짓게 되나요」",
+   "⑥ 이번 주 과제 — 나의 신앙 이야기를 ★세 문장으로 적어 오시기 (문답에서 그대로 쓰입니다)",
+  ],"첫 회차는 ★자격 심사가 아니라 ★복음 확인입니다. 「아직 확신이 없다」고 하시면 그 정직함을 먼저 받아 주십시오 — 확신은 문답 전에 완성되지 않아도 됩니다."),
+  ("2회차 · 고백과 교회 생활, 문답 준비 (약 50분)",[
+   "① 사도신경 함께 읽기 — 한 구절씩 «이 말이 내 삶에서 무슨 뜻인가»로 나눕니다",
+   "② 공적 고백의 무게 — 세례는 개인의 결심이 아니라 ★교회 앞에서 하는 약속입니다",
+   "③ 교회 생활 — 예배·헌금·봉사·소속(구역·셀). ★«해야 하는 일»이 아니라 «자녀가 누리는 자리»로 설명합니다",
+   "④ 성찬 — 세례 뒤에 함께 받게 되는 상입니다. 왜 순서가 그런지 (고전 11:23~29)",
+   "⑤ 문답 준비 — 당회 문답에서 실제로 무엇을 여쭙는지 ★미리 일러 드립니다",
+   "⑥ 세례식 당일 안내 — 시간 · 복장 · 순서 · 가족 초청 · 사진",
+  ],"문답을 ★시험처럼 겁주지 마십시오. 「틀리면 어쩌나」로 밤을 새우신 분들이 계십니다. 「아는 만큼, 믿는 만큼 말씀하시면 됩니다」라고 ★미리 말해 주십시오."),
+ ],
+ "유아세례":[
+  ("1회차 · 언약과 부모의 서약 (약 40분)",[
+   "① ★이 교육은 아기가 아니라 ★부모님이 받으십니다 — 아기의 믿음이 아니라 부모의 서약이기 때문입니다",
+   "② 언약의 뜻 — 하나님이 «너와 네 자손»에게 약속하신다는 것 (창 17:7 · 행 2:39)",
+   "③ ★유아세례가 하는 일과 ★하지 않는 일 — 아기를 «구원 완료»로 도장 찍는 것이 아닙니다. 자라서 ★본인의 고백이 반드시 필요합니다",
+   "④ 부모의 서약 문장 ★미리 읽기 — 예식 자리에서 처음 보시면 당황하십니다",
+   "⑤ 자주 나오는 물음 — 「아기가 기억도 못 하는데 뜻이 있나요」 「부모 중 한 사람만 믿어도 되나요」",
+  ],"부모님이 «나는 자격이 없다»고 느끼실 수 있습니다. ★흠 없는 부모라서 서약하는 것이 아니라, 부족한 부모가 하나님께 도움을 구하는 자리라고 말씀해 주십시오."),
+  ("2회차 · 가정에서의 신앙교육과 예식 안내 (약 40분)",[
+   "① 가정에서의 신앙교육 — 가정예배 · 기도 · 주일 습관을 ★실제로 어떻게. ★하루 3분부터 시작하시게 합니다",
+   "② 자녀가 자라며 달라지는 것 — 유아기 · 학령기 · 사춘기에 부모가 할 일이 각각 다릅니다",
+   "③ ★교회가 함께 집니다 — 예식에서 회중도 «함께 기르겠다»고 답합니다. 부모님만의 짐이 아닙니다",
+   "④ 앞으로의 길 — 유아세례 → 자라서 ★본인의 고백으로 학습 · 입교",
+   "⑤ 예식 당일 안내 — 시간 · 아기 옷 · 안는 순서 · 가족 좌석 · 사진",
+  ],"둘째·셋째 아이로 다시 오신 부모님께는 «지난번과 같은 이야기»가 되지 않게, ★첫 아이 때와 달라진 형편을 먼저 여쭙습니다."),
+ ],
+ "학습":[
+  ("1회차 · 학습이 무엇인지와 기본 진리 (약 45분)",[
+   "① 학습이 무엇인지 — 세례 ★«전»에, 믿음을 배우기 시작하셨음을 교회가 확인하는 단계입니다",
+   "② ★왜 곧바로 세례가 아닌가 — 서두르지 않고 ★배우실 시간을 드리는 것입니다. 등급이 아닙니다",
+   "③ 기본 진리 넷 — 하나님은 누구신가 · 사람과 죄 · 예수 그리스도 · 구원 (요 3:16 · 롬 3:23 · 롬 6:23)",
+   "④ 기도와 예배의 첫걸음 — 「기도를 어떻게 시작하나요」에 실제로 답해 드립니다",
+   "⑤ 자주 나오는 물음 — 「학습만 받고 세례는 안 받아도 되나요」 「학습 뒤 얼마나 있다가 세례를 받나요」",
+  ],"★학습은 «세례에서 떨어진 사람이 받는 것»이 아닙니다. 그렇게 오해하시면 마음이 상합니다 — ★등급이 아니라 순서임을 분명히 말해 주십시오."),
+  ("2회차 · 사도신경·주기도문·십계명과 교회 생활 (약 45분)",[
+   "① 사도신경 — 처음부터 끝까지 한 번, ★어려운 낱말을 풀어 가며 읽습니다",
+   "② 주기도문 — ★기도의 뼈대로 읽습니다 (마 6:9~13)",
+   "③ 십계명 — ★«하지 마라»가 아니라 «사랑하는 법»으로 읽습니다 (출 20:1~17)",
+   "④ 교회 생활 시작하기 — 예배 시간 · 앉을 자리 · 순서. ★처음 오신 분이 헤매시는 지점을 짚어 드립니다",
+   "⑤ 학습 문답 준비 — 무엇을 여쭙는지 미리 일러 드립니다",
+   "⑥ 다음 단계 안내 — 학습 → 세례 → (유아세례 받으신 분은) 입교",
+  ],"★외우게 하지 마십시오. 뜻을 아는 것이 먼저입니다. 못 외우셔서 교회를 떠나신 분이 실제로 계십니다."),
+ ],
+ "입교":[
+  ("1회차 · 입교가 무엇인지와 나의 고백 (약 45분)",[
+   "① 입교가 무엇인지 — 어릴 때 ★부모의 서약으로 유아세례를 받으신 분이, 이제 ★본인의 입으로 고백하는 자리입니다",
+   "② ★그래서 세례를 다시 받지 않습니다 — 세례는 한 번입니다. 입교는 그 세례를 ★내 것으로 받는 것입니다",
+   "③ 부모의 믿음에서 ★나의 믿음으로 — 어디까지가 물려받은 것이고 어디부터가 내 것인지 나눕니다",
+   "④ 신앙고백 확인 — 사도신경을 ★«내 고백»으로 읽습니다",
+   "⑤ 자주 나오는 물음 — 「어릴 때 받은 유아세례가 기억이 안 나는데 유효한가요」 「입교 안 하면 어떻게 되나요」",
+  ],"청소년·청년이 대상인 경우가 많습니다. ★어른 말투로 훈계하면 닫힙니다. 질문을 끝까지 듣는 자리로 만들어 주십시오."),
+  ("2회차 · 세례교인의 자리와 문답 준비 (약 45분)",[
+   "① 세례교인이 된다는 것 — 무엇을 누리고 무엇을 지는지 (성찬 참여 · 공동의회 등은 ★교단·교회 규정에 따릅니다)",
+   "② 성찬 — 이제 함께 받으십니다. 왜 지금부터인지 (고전 11:23~29)",
+   "③ 교회 안에서 나의 자리 — 봉사 · 소속(구역·셀) · 다음 단계 훈련",
+   "④ 문답 준비 — 당회 문답에서 무엇을 여쭙는지 미리 일러 드립니다",
+   "⑤ 예식 당일 안내 — 시간 · 복장 · 순서 · 가족 초청",
+  ],"★입교를 «졸업»으로 느끼고 발길이 뜸해지는 일이 흔합니다. ★입교 후 석 달을 누가 챙길지 ★이름을 정해 두십시오."),
+ ]}
+def sacrament_class(a):
+    """📖 성례 교육 (세례 · 유아세례 부모교육 · 학습 · 입교) — 교육 회차를 적어 두고, 무엇을 다룰지 ★2회분으로 안내해 드립니다.
+
+       ★★성찬은 여기 없다(오너 확정): 세례·학습·입교는 문답·교육과정이 실재하지만 성찬은
+         정식 교육과정이 아니다. 성찬은 «🍞 성찬 준비·안내» 카드가 따로 맡는다.
+       ★★아래 «다루는 것»은 ★교단 공인 과정이 아니라 흔히 다루는 항목이다 —
+         화면에도 그렇게 적어 목사님이 고쳐 쓰시게 한다. 없는 권위를 만들지 않는다."""
+    db=load(); db.setdefault("성례교육",[])
+    종류=(getattr(a,'kind','') or "세례").strip()
+    if 종류 not in _CLASS_KINDS:
+        print(f"종류는 {' · '.join(_CLASS_KINDS)} 중 하나로 적어 주세요 (비우시면 «세례»)."); return
+    이름raw=(getattr(a,'names','') or "").strip()
+    날짜=(getattr(a,'date','') or "").strip() or today()
+    내용=(getattr(a,'note','') or "").strip()
+    이름들=[x.strip() for x in 이름raw.replace(",",";").split(";") if x.strip()]
+
+    if 이름들:
+        교적밖=[]
+        for nm in 이름들:
+            if not find(db,nm): 교적밖.append(nm)
+            차=sum(1 for r in db["성례교육"] if r.get("종류")==종류 and r.get("이름")==nm)+1
+            db["성례교육"].append({"종류":종류,"이름":nm,"회차":차,"날짜":날짜,
+                                   "내용":내용,"등록일":today()})
+        save(db)
+        print(f"✅ {종류} 교육 {날짜} — {len(이름들)}분 기록했습니다"+(f" · 다룬 내용: {내용}" if 내용 else ""))
+        if 교적밖:
+            # ★교적에 없는 분도 ★버리지 않는다(새로 오신 분일 수 있다) — 다만 몇 분인지 알려 드린다
+            print(f"   ※ 이 중 {len(교적밖)}분은 교적에 아직 없습니다: {', '.join(교적밖)}")
+            print("      («교우 등록·수정» 카드로 넣어 두시면 다음부터 함께 관리됩니다.)")
+        print("")
+
+    print(f"■ 📖 성례 교육 — {종류}" + (" 부모교육" if 종류=="유아세례" else ""))
+    print("─"*66)
+    if 종류=="유아세례":
+        print("  ※ 이 교육을 받으시는 분은 ★아기가 아니라 ★부모님입니다.")
+        print("")
+    elif 종류=="학습":
+        print("  ※ 학습은 ★세례 «전» 단계입니다 — 세례에서 떨어진 것이 아니라, 배우실 시간을 드리는 자리입니다.")
+        print("     ★교단에 따라 학습을 두지 않는 곳도 있습니다. 교회 형편에 맞게 쓰십시오.")
+        print("")
+    elif 종류=="입교":
+        print("  ※ 입교는 ★유아세례를 받으신 분이 자라서 ★본인의 고백으로 서는 자리입니다.")
+        print("     ★세례를 다시 받지 않습니다 — 세례는 한 번입니다.")
+        print("")
+    기록=[r for r in db.get("성례교육",[]) if r.get("종류")==종류]
+    if 기록:
+        사람별={}
+        for r in 기록: 사람별.setdefault(r.get("이름",""),[]).append(r)
+        print(f"  ▣ 지금까지 {len(사람별)}분 · 모두 {len(기록)}회")
+        for nm,rs in sorted(사람별.items()):
+            rs=sorted(rs,key=lambda x:(x.get("날짜",""),x.get("회차",0)))
+            끝=rs[-1]
+            print(f"   · {nm:<10} {len(rs)}회차까지 · 마지막 {끝.get('날짜','')}"
+                  + (f" — {끝.get('내용','')}" if 끝.get("내용") else ""))
+    else:
+        print("  ▣ 아직 적어 두신 교육 기록이 없습니다.")
+        print("     «교육 받으실 분» 칸에 이름을 넣고 실행하시면 그날 회차로 적어 둡니다.")
+    print("")
+    print("  ▣ 이 교육에서 흔히 다루는 것 — ★2회분 예시")
+    for 제목,항목들,유의 in _CLASS_TOPICS[종류]:
+        print("")
+        print(f"    ── {제목}")
+        for t in 항목들: print(f"       {t}")
+        print(f"       ※ 인도자 유의 · {유의}")
+    print("")
+    print("     ※ ★교단·교회마다 다릅니다 — 위는 흔히 다루는 항목이니 교회 형편에 맞게 고쳐 쓰십시오.")
+    print("     ※ ★2회로 나눈 것은 예시입니다 — 한 번에 하셔도 되고, 더 나누셔도 됩니다.")
+    print("")
+    print("  ▣ 교육을 마치신 뒤")
+    print("     · 당회 문답·심의가 필요하시면 «성례 서식» 카드에서 신청서를 뽑으실 수 있습니다.")
+    print("     · 실제로 성례를 베푸신 뒤에는 «성례 등록 & 대장» 카드에 넣으셔야")
+    print("       나중에 세례증명서를 뗄 수 있습니다. ★이 교육 기록만으로는 증명서가 나오지 않습니다.")
+    print("")
+    print("  ▣ 이 카드가 ★하지 않는 것")
+    print("     · ★수료증을 만들지 않습니다 — 교육을 인정하는 절차는 교단·당회마다 달라서,")
+    print("       프로그램이 «수료»를 발급하면 없는 권위를 만드는 것이 됩니다.")
+    print("     · 이 기록은 ★성례 대장이 아닙니다 — «받기 전 준비»이지 «받았다»가 아닙니다.")
+    print("     · 성찬은 여기 없습니다 — 성찬은 정식 교육과정이 아니라서")
+    print("       «🍞 성찬 준비·안내» 카드가 따로 맡습니다.")
+
 def sacrament_apply(a):
     """📝 성례 서식 — '무엇을'이 증명서면 세례증명서 발급, 아니면 신청서 서식(당회 제출·심의용)."""
     if '증명' in (getattr(a,'mode','') or '').strip():   # 세례교인 증명서 발급으로 라우팅
@@ -5084,9 +6677,9 @@ def sacrament_apply(a):
     para(d,f"{CHURCH}",11,GOLD,True,AL.CENTER,after=0,font=SANS)
     para(d,f"{kind} 신청서",22,NAVY,True,AL.CENTER,before=4,after=6,font=SANS); hr(d,"1B2A4A",12)
     if kind=="유아세례":
-        fields=[("아기 이름",a.name),("생년월일",a.birth),("아버지",""),("어머니",""),("주소",a.addr),("연락처",a.tel),("소속 셀·부서",a.cell)]
+        fields=[("아기 이름",a.name),("생년월일",a.birth),("아버지",""),("어머니",""),("주소",a.addr),("연락처",a.tel),("소속 구역(셀)·부서",a.cell)]
     else:
-        fields=[("성명",a.name),("생년월일",a.birth),("주소",a.addr),("연락처",a.tel),("소속(셀·부서)",a.cell),
+        fields=[("성명",a.name),("생년월일",a.birth),("주소",a.addr),("연락처",a.tel),("소속(구역·셀·부서)",a.cell),
                 ("신앙 경력",""),("현재 신앙 상태",""),("추천 인도자",a.leader)]
     rows=[[k,(v if v else "____________________________")] for k,v in fields]
     _ref_table(d,rows,colored=False)
@@ -5094,7 +6687,7 @@ def sacrament_apply(a):
     para(d,today(),10,GRAY,align=AL.CENTER,after=4,font=SANS)
     para(d,"신청인 : ______________________ (서명)",11,align=AL.CENTER,after=2)
     para(d,"※ 본 신청서는 당회 심의를 거쳐 성례대장에 등재됩니다.",9,LG,before=12,font=SANS)
-    out=os.path.join(CAT("02"),f"[{sanit(kind)}신청서] {sanit(a.name or '양식')}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("02"),f"[{sanit(kind)}신청서] {sanit(a.name or '양식')}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ {kind} 신청서 생성: {out}")
 def event_add(a):
     """📅 일정 등록 — 날짜·제목·내용·중요표시. 캘린더와 대시보드에 표시됩니다."""
@@ -5145,7 +6738,7 @@ def cal_print(a):
             for e in byday.get(day,[]): lines+="\n"+("★" if e.get("중요") else "·")+str(e.get("제목") or e.get("주제") or e.get("유형",""))[:11]
             ctext(c,lines,10,NAVY if byday.get(day) else GRAY,False,SANS,AL.LEFT)
     tborders(t,"BBBBBB",4)
-    out=os.path.join(CAT("01"),f"[일정달력] {sanit(ym)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("01"),f"[일정달력] {sanit(ym)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ {y}년 {mo}월 일정 달력: {out}")
 def church_setup(a):
     """⛪ 우리 교회 이름 설정 — 교회명·담임명을 입력하면 설정파일에 자동 저장(직접 편집 불필요).
@@ -5174,6 +6767,18 @@ def manual(a):
     para(d,"교회 종합행정 프로그램",26,NAVY,True,AL.CENTER,after=2,font=SANS)
     para(d,"사용 설명서",18,MAROON,True,AL.CENTER,after=6,font=SANS); hr(d,"A67C1E",12)
     para(d,f"v{VERSION} · {CHURCH} 교회 종합행정 · 무료",10,LG,AL.CENTER,before=8,font=SANS)
+    # ★두 날짜를 첫 장에 나란히 적는다 (2026-08-27 · 오너 지시).
+    #   목사님이 «지금 보는 설명서가 지금 프로그램 것인가»를 ★스스로 아실 수 있게.
+    _pv=_ver_date(VERSION) or ""
+    para(d,f"매뉴얼 판  {MANUAL_VER}",11,NAVY,True,AL.CENTER,before=10,after=1,font=SANS)
+    para(d,f"프로그램 판  {'%04d-%02d-%02d'%_pv if _pv!=(0,0,0) else VERSION[:10]}",11,NAVY,True,AL.CENTER,after=2,font=SANS)
+    if _pv and _ver_date(MANUAL_VER) < _pv:
+        para(d,"⚠ 프로그램이 매뉴얼보다 새 것입니다 — 매뉴얼을 다시 만들어 주세요.",
+             11,MAROON,True,AL.CENTER,before=4,after=2,font=SANS)
+        para(d,"(화면의 「사용 설명서 만들기」를 다시 누르시면 최신 내용으로 새로 만들어집니다)",
+             9.5,GRAY,AL.CENTER,after=2,font=SANS)
+    elif _pv:
+        para(d,"이 설명서는 지금 쓰고 계신 프로그램과 같은 판입니다.",9.5,GRAY,AL.CENTER,after=2,font=SANS)
     d.add_page_break()
     secs=[
      ("시작하기",[
@@ -5199,7 +6804,7 @@ def manual(a):
       "③ ‘엑셀·CSV 파일’ 칸에 파일 이름을 넣고 그대로 실행합니다 — 이때는 미리보기라 자료가 바뀌지 않습니다.",
       "④ 화면에 ‘새로 등록 ○명 · 이미 있는 분 ○명’이 나옵니다. 숫자가 맞는지 확인하세요. 함께 만들어진 검수표(엑셀)를 열어 명단을 직접 대조하시면 가장 확실합니다.",
       "⑤ 맞으면 ‘실제로 등록’ 칸에 1 을 넣고 다시 실행합니다. → 등록됩니다.",
-      "★ 열 제목이 달라도 알아서 맞춰 드립니다 — ‘성명·이름’, ‘휴대폰·연락처·전화’, ‘구역·소속셀·목장’처럼 교회마다 다른 이름을 알아봅니다. 이름 칸만 있으면 등록됩니다.",
+      "★ 열 제목이 달라도 알아서 맞춰 드립니다 — ‘성명·이름’, ‘휴대폰·연락처·전화’, ‘구역(셀)·목장·속회’처럼 교회마다 다른 이름을 알아봅니다. 이름 칸만 있으면 등록됩니다.",
       "★ 등록 직전에 자동으로 백업합니다. 백업에 실패하면 등록을 하지 않고 멈춥니다(자료를 지키기 위한 안전장치).",
       "★ 이미 등록된 분은 기본적으로 건너뜁니다. ‘이미 등록된 분’ 칸에 보완 을 넣으시면 ‘비어 있는 칸만’ 채웁니다 — 기존에 입력하신 정보는 절대 덮어쓰지 않습니다.",
       "★ 같은 이름이 두 분 계시거나 교적의 이름과 정확히 같지 않으면, 다른 분 정보가 섞이지 않도록 그대로 두고 그 명단을 알려 드립니다. 그때는 교우 카드에서 직접 확인해 주세요.",
@@ -5302,7 +6907,10 @@ def manual(a):
       "  글자가 잘 보이도록 사진 위에 은은한 막을 자동으로 씌워 드리니, 밝은 사진·어두운 사진 모두 괜찮습니다. (가로로 넓은 사진이 예쁘게 채워집니다.)",
       "고른 화면 설정은 이 컴퓨터에 저장되어, 프로그램을 껐다 켜도 그대로 유지됩니다."]),
      ("🎬 행사 홍보영상 만들기 — 영상이 처음이어도 괜찮습니다",[
-      "‘영상·홍보’ 섹션은 영상 편집을 한 번도 안 해보신 목사님도 행사 홍보영상을 만들 수 있게 돕습니다. 준비(대본·자막·조립 순서)를 완벽하게 해드리니, 무료 편집 프로그램으로 순서만 따라 완성하시면 됩니다.",
+      # ★«완벽하게»를 뺀다 (2026-08-29 · 리뷰어1 과장문구 실측 1건 · master 지시 ⑤).
+      #   ★이 카드가 실제로 하는 일은 «대본·자막·조립 순서를 적어 드리는 것»까지다.
+      #     완성은 목사님이 편집기에서 하신다 — 그러니 «완벽»은 우리가 할 수 있는 말이 아니다.
+      "‘영상·홍보’ 섹션은 영상 편집을 한 번도 안 해보신 목사님도 행사 홍보영상을 만들 수 있게 돕습니다. 대본·자막·조립 순서를 적은 작업지를 만들어 드리니, 무료 편집 프로그램으로 그 순서를 따라 완성하시면 됩니다.",
       "◆ ‘행사 홍보영상 기획·대본 (만들 준비)’ 카드: 행사명·목적·길이만 넣고 실행하면 → ①장면 구성(스토리보드) ②나레이션 대본 초안 ③화면 자막 문구 ④영상 AI에 붙여넣을 프롬프트 ⑤무료 편집 프로그램으로 조립하는 순서까지 한 장으로 만들어 드립니다.",
       "◆ 만드는 순서(가장 쉬운 길): 1)작업지를 뽑는다 → 2)Clipchamp(윈도우11에 이미 있음)나 Canva에서 홍보영상 템플릿을 연다 → 3)작업지 스토리보드대로 사진·영상을 넣는다 → 4)‘자동 자막’·‘AI 음성’으로 자막과 나레이션을 넣는다 → 5)저작권 무료 음악을 깔고 내보낸다.",
       "◆ 영상 AI: 작업지에 있는 프롬프트를 Runway·Pika·Kling·Canva 등 영상 AI(무료 한도 있음)에 붙여넣으면 오프닝·배경 컷을 만들어 줍니다. (실제 사람·교회 건물은 직접 찍은 사진/영상이 더 자연스럽습니다.)",
@@ -5312,13 +6920,17 @@ def manual(a):
       "※ 사진만 넣으면 자동으로 영상까지 만들어 주는 기능은 다음 업데이트에 정식 지원 예정입니다. 이번 판에서는 위 작업지 + 무료 편집기(Clipchamp·Canva)로 만드시는 방식입니다 — 오히려 목사님 손으로 다듬은 영상이 더 자연스럽고 좋습니다.",
       "◆ 설교·예배 영상: ‘설교 슬라이드(PPT) 만들기’ 카드에 설교 제목·본문·대지를 넣으면 예배 화면용 슬라이드(PPT)가 자동으로 만들어집니다. 그리고 ‘예배·설교 영상 — 녹화·유튜브 라이브 완전 가이드’ 카드에 녹화 요령·무료 자동자막·유튜브 업로드·실시간 방송(OBS·Prism Live)까지 쉽고 자세히 담겨 있습니다. (설교 본편은 목사님 목소리로 직접 녹화하시는 것이 가장 은혜롭습니다.)"]),
      ("① 목양 — 성도 관리",[
-      "교인 등록: 이름·연락처·주소·생일·결혼기념일·세례일·직분·소속셀·심방주기",
+      "교인 등록: 이름·연락처·주소·생일·결혼기념일·세례일·직분·구역(셀)·심방주기",
       "★교인 명단 한 번에 등록(엑셀·CSV): 이미 갖고 계신 명단 파일을 통째로 불러옵니다 — 한 분씩 입력하지 않으셔도 됩니다(미리보기 → 검수표 확인 → 등록).",
+      "★🍞 성찬 준비·안내: 성찬 시행일을 적어 두고, 성찬 전에 챙기실 것(떡·잔 준비 인원, 배찬 순서, 못 나오시는 분)과 주보·광고에 그대로 넣으실 안내 문장을 한 장으로 드립니다. ★성찬은 ‘성례 등록 대장’에 쌓지 않습니다 — 그 대장은 세례·학습·입교처럼 한 번 받고 증명서를 떼는 자리라, 매번 받는 성찬을 넣으면 세례 기록이 묻히기 때문입니다. ★참여하신 분 명단을 남기는 기능은 아직 넣지 않았습니다(목사님께 먼저 여쭙고 정하려고 비워 두었습니다).",
+      "★✅ 구역(셀)별 52주 출석 체크판: 구역의 52주 출석을 한 판에 놓고 ★찍습니다. 보기만 하는 판이 아니라 찍는 판입니다. ★찍으신 구역만 기록되고, 아직 안 찍으신 구역은 ‘안 나오심’이 아니라 ‘기록 없음’으로 남습니다 — 한 구역을 찍었다고 다른 구역이 결석이 되지 않습니다. ★구역을 아직 안 적으신 분들은 ‘미배정’ 구역으로 모아 드려 그분들도 찍으실 수 있습니다. 표시: ▇ 나오심 · ▁ 안 나오심(그 주에 그 구역을 찍으셨을 때만) · · 기록 없음. 여기서 쌓인 기록이 ‘성도 한눈에 보기’의 출석률과 ‘장기결석자 찾기’를 켭니다.",
+      "★📱 폰에서 문자 앱 열기: 심방 길에서 폰으로 바로 문자를 보내실 수 있게, 받으실 분과 문구가 ★미리 채워진 «문자 앱 여는 주소»를 만들어 드립니다. ★프로그램이 문자를 보내지 않습니다 — 이 단추가 하는 일은 «문자 앱을 여는 주소를 만드는 것»까지이고, ★보내기는 목사님이 문자 앱에서 직접 누르셔야 합니다(그래서 이 프로그램 때문에 드는 돈이 없습니다 — 문자 요금 자체는 목사님 요금제대로입니다). ★2026-08-28 기준, 실제 폰에서 문자 앱이 뜨는 것은 ★아직 확인하지 못했습니다 — 그래서 «열립니다»라고 적지 않습니다. ★사무실 컴퓨터에는 문자 앱이 없어 열리지 않을 것입니다 — 폰에서 눌러 주세요.",
+      "★📜 교인 명단(교회 등록순): 우리 교회에 먼저 오신 분부터 차례로 봅니다 — 등록번호는 그분이 교회에 처음 오신 날입니다(2006년 8월 2일에 오셨으면 20060802). 누가 가장 먼저 오셨는지·누가 오래 다니셨는지가 한눈에 보입니다. ‘정렬’ 칸에 ‘가나다’를 적으시면 이름순으로 바뀝니다.",
       "가족 등록: 배우자·자녀 등 가족관계 / 직분 이력: 임직·취임 변동 기록",
       "★심방 브리핑: 심방 전에 ‘지난 말씀·받은 기도제목’을 보여줘 같은 말 반복·재질문을 막습니다",
       "심방 기록: 오늘 나눈 말씀·기도제목·후속 저장(교인별 누적)",
       "새가족: 등록 → 주차별 양육 → 정착 대시보드(빠진 사람 경고) → 정식 교인 전환",
-      "소그룹(셀): 등록·조원명단·주간보고·셀보고서 인쇄양식",
+      "소그룹(구역·셀): 등록·조원명단·주간보고·구역보고서 인쇄양식",
       "태신자(전도대상): 담당 성도 배정·접촉 기록·결신 시 새가족 자동 전환",
       "생일·기념일: 다가오는 생일/결혼기념일 미리 알림 + 축하 문자 초안",
       "돌봄 필요: 오래 심방 못 한 성도 자동 감지 / 주간 목회 브리핑",
@@ -5326,11 +6938,13 @@ def manual(a):
       "★상황별 축하·위로: 군입대·전역·진급·취업·합격·졸업·출산·개업·이사·퇴원·은퇴 등 상황을 고르고 이름을 넣으면, 골라 쓸 수 있는 축하·위로 카톡 문구를 만들어 드립니다(무료 붙여넣기).",
       "★교적 이동: 전입·전출·이명을 기록하고 교인 상태를 자동 갱신합니다. 다른 교회로 옮기는 성도에게는 ‘증명서 발급’에서 이명증서를 떼어 드릴 수 있습니다."]),
      ("★ 성례·전도·다음세대 기능",[
+            "★📱 폰 접속 설정 — 진단 3줄: 폰에서 안 보일 때 ★무엇이 막고 있는지를 프로그램이 직접 읽어 알려 드립니다. (가)폰이 들어올 문(8899)이 ★어느 주소에 열려 있나 (나)윈도우 방화벽이 ★이 프로그램을 허용하고 있나 (다)지금 연결된 망의 종류와, ★그 허용이 이 망에서도 듣는가. ★방화벽 허용이 없거나 지금 망에서 안 들으면 폰이 두드려도 윈도우가 막습니다 — 그럴 때는 함께 드리는 「폰에서 열리게 하기」 파일을 ★오른쪽 단추로 «관리자 권한으로 실행» 한 번만 해 주시면 됩니다(그 파일은 ★허용만 더하고 컴퓨터의 다른 설정은 바꾸지 않습니다). ★프로그램이 대신 고치지 못하는 이유는 윈도우가 관리자 권한을 요구하기 때문입니다. ★진단이 다 «괜찮다»로 나와도 «폰에서 열립니다»라고는 말하지 않습니다 — 공유기와 폰 쪽은 이 컴퓨터가 읽을 수 없기 때문입니다. ★읽지 못한 항목은 «확인 못 함»이라고 적습니다 — 못 잰 것을 정상이라 하지 않습니다.",
+"★📖 성례 교육(세례 · 유아세례 부모교육 · 학습 · 입교): 교육 회차를 적어 두고 무엇을 다룰지 ★2회분 커리큘럼으로 안내해 드립니다 — 회차마다 다룰 항목과 ★인도자 유의사항까지 함께 드립니다. ★유아세례 교육을 받으시는 분은 아기가 아니라 ★부모님입니다(아기의 믿음이 아니라 부모의 서약이기 때문입니다). ★학습은 세례 «전» 단계이고, ★입교는 유아세례를 받으신 분이 자라서 ★본인의 고백으로 서는 자리입니다(세례를 다시 받지 않습니다). 흔히 다루는 항목을 종류별로 드리되 ★교단·교회마다 다르니 고쳐 쓰십시오 — 교단 공인 과정이 아닙니다. ★수료증은 만들지 않습니다(인정 절차가 교단·당회마다 달라, 프로그램이 «수료»를 발급하면 없는 권위를 만드는 것이 됩니다). ★이 기록은 성례 대장이 아닙니다 — «받기 전 준비»이지 «받았다»가 아니라, 실제로 베푸신 뒤에는 ‘성례 등록 & 대장’에 넣으셔야 증명서가 나옵니다. ★성찬은 여기 없습니다(정식 교육과정이 아니라서 ‘성찬 준비·안내’ 카드가 따로 맡습니다).",
       "성례대장(세례·학습·입교): ‘성례 등록’으로 세례·학습·입교·유아세례를 기록하면 성례대장에 남고, 훗날 기독교 대학 진학 등에 필요한 세례 증명서 발급의 근거가 됩니다. 신청서 서식도 함께 있습니다.",
       "발급대장: 발급한 모든 증명서(교인·세례·재적·이명 등)가 문서번호·발급일·대상·용도와 함께 자동으로 기록됩니다.",
       "새생명축제·태신자운동: ‘준비 타임라인’에 축제일을 넣으면 D-56부터 후속까지 날짜별 준비사항을, ‘당일 진행 체크리스트’와 참고자료(초청카드 서식·부록 18종 포함)를 함께 제공합니다. 요즘은 주일 오전 예배를 축제일(D-DAY)로 삼습니다.",
       "여름공과: ‘여름공과’ 카드 하나에 7주제(1창조·2복음·3동행·4사랑섬김·5믿음·6기도·7제자도)가 모여 있어, 번호 1~7을 넣으면 해당 공과가 열립니다.",
-      "구역·속회 예배 순서지: 구역장이 인도하기 좋게 순서·나눔 질문·기도제목 칸이 담긴 순서지를 만들어 드립니다."]),
+      "구역(셀)·속회 예배 순서지: 구역장이 인도하기 좋게 순서·나눔 질문·기도제목 칸이 담긴 순서지를 만들어 드립니다."]),
      ("② 예배·설교",[
       "설교 작성: 예배유형(새벽·수요·금요·주일오전/오후·중고등부 등) 선택 → 유형별 폴더 자동정리",
       "  설교 틀(장면→진리→그리스도) + 내 예화·주석 + 성경본문(KJV·WEB) 준비 → 내용은 목사님이 채움",
@@ -5373,7 +6987,7 @@ def manual(a):
       "★재정 엑셀 가져오기: 재정부가 쓰시던 엑셀(거래 장부·연간 결산표·주간 헌금표)을 그대로 불러옵니다 — 미리보기·검수표로 장부와 대조한 뒤 반영하시면, 결산서·기부금영수증까지 그대로 나옵니다.",
       "주일 재정 결산서(전주이월·차주이월 자동) · 재정 출납부(원장) · 헌금·지출 표준 항목표",
       "교인별 헌금대장(항목별) · 연말정산 기부금영수증 발급",
-      "★예산 관리(전문 재정프로그램식): ‘예산안 편성 양식’으로 작년 실적을 참고칸에 자동으로 채운 표를 뽑아 제직회에서 정한 뒤 → ‘예산 편성’ 카드에 항목별 예산을 입력하면 → ‘예산 대비 집행 현황’이 연중 집행률·잔액·예산 초과를 자동 계산해 제직회 보고서로 만들어 드립니다.",
+      "★예산 관리(작은 교회 기준): ‘예산안 편성 양식’으로 작년 실적을 참고칸에 자동으로 채운 표를 뽑아 제직회에서 정한 뒤 → ‘예산 편성’ 카드에 항목별 예산을 입력하면 → ‘예산 대비 집행 현황’이 연중 집행률·잔액·예산 초과를 자동 계산해 제직회 보고서로 만들어 드립니다.",
       "  예산 편성 팁: 항목명을 ‘헌금·지출 항목표’와 똑같이(예: 십일조, 인건비(사례비)) 쓰면 실제 기록과 정확히 대조됩니다."]),
      ("⑥ 출력·파일",[
       "한글(.hwp) 변환: 만든 docx를 네이티브 한글파일로 — 한컴오피스가 설치된 PC에서만 됩니다(안 되어 있어도 docx는 한글에서 그대로 열립니다)",
@@ -5413,6 +7027,24 @@ def manual(a):
       "   3) 되살리고 싶은 시점을 고르면 그 시점으로 자료가 되돌아옵니다. 방금 전 상태로 급히 되살리려면 ‘가장 최근으로 복구’를 누르세요.",
       "🔒 이중 안전장치: 복구를 실행하면 ‘지금 상태’도 따로 백업해 둡니다. 그래서 혹시 시점을 잘못 골라 복구해도 다시 되돌릴 수 있습니다 — 어떤 경우에도 자료가 사라지지 않습니다.",
       "TIP: 스냅샷은 저장할 때마다 자동으로 쌓이므로 목사님이 평소 하실 일은 없습니다. ‘복구가 필요할 때 이 카드만 기억하세요.’"]),
+     # ★77(피닉스) 옆에 78(업데이트 되돌리기)을 나란히 둔다 (2026-08-29).
+     #   ★자동 기능목록이 카드 이름은 이미 싣고 있으나, 손글 절에는 77만 있어 ★상세도가 짝이 안 맞았다.
+     #   ★그리고 이 둘은 ★이름이 비슷해서 더 위험하다 — «복구»와 «되돌리기»가 ★서로 다른 것을 되살린다.
+     #     그 구분을 여기서 ★먼저 말해 두지 않으면, 자료를 되살리셔야 할 때 78을 누르신다.
+     ("↩️ 업데이트 되돌리기 — 새 판이 마음에 안 드실 때 (77과 헷갈리지 마세요)",[
+      "★77 과 무엇이 다른가 (이것만 기억하시면 됩니다):",
+      "   · 🔥 77 피닉스 복구 = ‘자료’를 되살립니다 — 교인·심방·재정 기록.",
+      "   · ↩️ 78 업데이트 되돌리기 = ‘프로그램’을 되돌립니다 — 코드와 안내문.",
+      "   ⇒ 교인을 실수로 지우셨으면 77 입니다. 업데이트하고 나서 뭔가 이상해졌으면 78 입니다.",
+      "이것이 무엇인가: 업데이트를 하면 바뀌기 ★직전의 프로그램 파일을 자동으로 보관해 둡니다. 새 판이 마음에 안 드시거나 뭔가 이상해졌을 때, 그 직전으로 되돌릴 수 있습니다.",
+      "되돌리는 방법:",
+      "   1) 대시보드에서 ‘↩️ 업데이트 되돌리기’ 카드를 누릅니다 (간편메뉴에서는 78번).",
+      "   2) ★그냥 실행하시면 «무엇을 언제로 되돌리는지»만 보여 드리고 ★아무것도 바뀌지 않습니다 — 먼저 보십시오. 되돌릴 시점, 바뀔 파일 수, 지금 판과 되돌아갈 판을 알려 드립니다.",
+      "   3) 확인하신 뒤 ‘실제로 되돌리기’ 칸에 1을 넣고 다시 실행하시면 그때 되돌립니다.",
+      "★교인·심방·재정 자료와 설정은 건드리지 않습니다 — 되돌리는 것은 프로그램 파일뿐입니다. 그래서 되돌려도 교인 한 분도 사라지지 않습니다.",
+      "🔒 이중 안전장치: 되돌리기 ★직전에 ‘지금 상태’도 함께 보관합니다. 그래서 되돌린 뒤 마음이 바뀌시면 ‘업데이트’를 다시 눌러 새 판으로 오실 수 있습니다.",
+      "★되돌리신 뒤에는 프로그램을 껐다 다시 켜 주세요 — 그때부터 되돌린 판으로 돕니다.",
+      "TIP: 업데이트가 도중에 끊겼을 때도 이 카드가 도움이 됩니다. 프로그램이 ‘지난 업데이트가 끝까지 가지 못했습니다’라고 알려 드리면, ①‘업데이트’를 한 번 더 누르시거나 ②이 카드로 되돌리시면 됩니다."]),
      ("★ USB·D 자동 이중저장 (안전이 최고)",[
       "왜: 컴퓨터가 고장나거나 실수로 지워도, USB나 D드라이브에 똑같이 있으면 자료를 잃지 않습니다.",
       "설정(딱 한 번): ‘USB·D 자동저장 설정’ 카드(또는 set-backup)에 폴더를 넣으세요. 예) USB는 E:\\교회백업, D드라이브는 D:\\교회백업",
@@ -5434,7 +7066,24 @@ def manual(a):
                 _depth-=1
                 if _depth==0: _blk=_cw[_s:_k+1]; break
         _ACTIONS=eval(_blk) if _blk else []
-    except Exception: _ACTIONS=[]
+        _ACT_ERR="" if _ACTIONS else "기능 목록이 비어 있습니다"
+    except Exception as _e:
+        _ACTIONS=[]; _ACT_ERR=f"{type(_e).__name__}"
+    # ★★조용한 실패를 없앤다 (2026-08-29).
+    #   ★종전: 여기서 실패하면 _ACTIONS=[] 가 되고 아래 `if _ACTIONS:` 가 ★통째로 건너뛴다.
+    #     그러면 설명서에서 ★전체 기능 목록(절반 분량)이 ★아무 말 없이 빠지는데,
+    #     화면에는 «✅ 사용 설명서(DOCX)» ★성공 문구만 뜬다. ⇒ 짧아진 설명서를 «정상»으로 아신다.
+    #   ★정상 설치에서는 재현되지 않는다 — 그러나 ★구조가 조용한 실패다.
+    #     («안 죽었다»는 rc=0 이지 «다 했다»가 아니다 — 오늘 리뷰어1도 이 자리에 속아 오검출을 냈다.)
+    #   ★그래서 ★문서 안에도 적고 ★화면에도 적는다. 한 곳만 적으면 못 보시는 쪽이 생긴다.
+    if not _ACTIONS:
+        para(d,"※ 기능 목록을 넣지 못했습니다(church_web.py 를 읽지 못함) — 설명서가 짧게 나왔습니다.",
+             10,MAROON,True,before=8,after=2,font=SANS)
+        para(d,f"   (원인: {_ACT_ERR}) 프로그램 폴더의 church_web.py 를 확인해 주세요. "
+               "교인·재정 자료와는 무관하며, 자료는 그대로 있습니다.",9.5,GRAY,after=4,font=SANS)
+        print("⚠ 기능 목록을 넣지 못했습니다(church_web.py 를 읽지 못함) — ★설명서가 짧게 나왔습니다.")
+        print(f"   원인: {_ACT_ERR} · 프로그램 폴더의 church_web.py 를 확인해 주세요.")
+        print("   ※ 교인·재정 자료와는 무관합니다 — 자료는 그대로 있습니다.")
     if _ACTIONS:
         d.add_page_break()
         para(d,"전체 기능 한눈에 보기",16,NAVY,True,AL.CENTER,after=2,font=SANS)
@@ -5454,14 +7103,14 @@ def manual(a):
     hr(d,"C9BF9E",8); para(d,"【저작권 및 이용 안내】",10,NAVY,True,before=8,after=2,font=SANS)
     para(d,COPYRIGHT_NOTICE,9,GRAY,after=4,font=SANS)
     folder=CAT("01")
-    out=os.path.join(folder,f"[사용설명서] {sanit(CHURCH)}_v{sanit(VERSION)}.docx"); _savedoc(d,out)
+    out=os.path.join(folder,f"[사용설명서] {sanit(CHURCH)}_v{sanit(VERSION)}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 사용 설명서(DOCX): {out}")
     print("   ※ 한글(.hwp)로 원하시면 '한글 변환' 카드를 눌러주세요. (DOCX도 한글에서 그대로 열립니다)")
 def helpcmd(a):
     print(__doc__); print("""
 명령 요약:
   member-add   --name 이름 [--sex --birth --tel --addr --role --cell --leader --baptism --memo]
-  member-list  [--cell 셀]          member-show --name 이름
+  member-list  [--cell 구역]          member-show --name 이름
   visit-add    --name 이름 --word 말씀 --prayer "제목1;제목2" [--note --followup --kind --by --date]
   visit-brief  --name 이름          ← 다음 심방 전 반드시! (중복 말씀·재질문 방지)
   cert         --name 이름 --kind 교인|세례|헌금 [--purpose 용도 --no 번호]
@@ -5497,7 +7146,7 @@ def helpcmd(a):
   sermon-log   --date --title --text 본문 --service --series  ← 설교 이력 기록
   sermon-list  [--query 검색 --year]  ← "언제 무슨 설교 했나"(본문·제목 검색·반복확인)
   song-catalog / songbook             ← 찬양 작품집 / 찬양집(악보집) 출판
-  newfamily-add --name --tel --leader 인도자 --cell 셀   ← 새가족 등록(정착관리 시작)
+  newfamily-add --name --tel --leader 인도자 --cell 구역   ← 새가족 등록(정착관리 시작)
   newfamily-step --name --how 심방|전화|문자 --note      ← 새가족 양육 접촉 기록
   newfamily-board                     ← 새가족 정착 대시보드(미이행 경고·뒷문 방지)
   newfamily-graduate --name [--role]  ← 정착 완료→정식 교인 전환
@@ -5512,10 +7161,10 @@ def helpcmd(a):
   commentary-list                     ← 내 성경주석 라이브러리 목록
   bible        --ref "요한복음 3:16" --version 개역개정|niv|kjv   ← 성경본문(데이터 필요)
   devotion     --title 제목 --text 본문 --verse 말씀 --body 묵상 ← 오늘의 묵상(성도 발송)
-  birthday     [--days 30]            ← 성도 생일 축하(다가오는 생일·결혼기념일+축하문자·셀명단)
+  birthday     [--days 30]            ← 성도 생일 축하(다가오는 생일·결혼기념일+축하문자·구역명단)
   care         [--days 90]            ← 돌봄 필요 성도(심방 오래 경과)
   newcomer     [--days 90]            ← 새가족 정착 파이프라인
-  kakao        --type birthday|devotion|custom [--to 셀|all --text --ahead]  ← 카톡에 붙여넣기 목록(무료 붙여넣기형)
+  kakao        --type birthday|devotion|custom [--to 구역|all --text --ahead]  ← 카톡에 붙여넣기 목록(무료 붙여넣기형)
   weekly-brief                        ← 주간 목회 브리핑(출석·재정·생일·돌봄 한 장 요약)
   prayer-add   --name 교인 --text 내용 --theme 주제 / prayer-digest  ← 기도제목 접수·주제별 정리
   giving-insight [--days 60]          ← 헌금 케어 신호(정기헌금 끊긴 교인 감지)
@@ -5559,7 +7208,7 @@ def meeting_minutes(a):
     para(d,date,11,GRAY,AL.CENTER,after=8,font=SANS)
     para(d,f"사회 {a.host or PASTOR}  (인)          서기 {a.clerk or ''}  (인)",12,NAVY,True,AL.CENTER,font=SANS)
     para(d,f"· {CHURCH}",9,LG,align=AL.RIGHT,before=8,font=SANS)
-    out=os.path.join(CAT("01"),f"[회의록] {kind}_{date}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("01"),f"[회의록] {kind}_{date}.docx"); out=_savedoc(d,out) or out
     print(f"✅ {kind} 회의록 생성: {out}")
 def official_doc(a):
     """📄 공문(협조문) — 문서번호 자동채번·수신/제목/본문/발신 표준 두문·본문·결문."""
@@ -5576,7 +7225,7 @@ def official_doc(a):
     para(d,"위와 같이 협조하여 주시기 바랍니다.  끝.",11,GRAY,before=6,after=16,font=SERIF)
     para(d,date,13,NAVY,True,AL.CENTER,after=6,font=SANS)
     para(d,f"{CHURCH}  {a.sender or ('담임목사 '+PASTOR)}   (직인)",14,NAVY,True,AL.CENTER,font=SANS)
-    out=os.path.join(CAT("07"),f"[공문] {sanit(a.title or '공문')}_{date}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[공문] {sanit(a.title or '공문')}_{date}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 공문 발급(제 {no} 호): {out}")
 def asset_register(a):
     """📦 비품대장 — 품목·수량·구입일·위치·담당·상태(가로 대장, 누적). --name 지정 시 추가 후 대장 재생성."""
@@ -5602,7 +7251,7 @@ def asset_register(a):
         for j,v in enumerate(vals):
             ctext(t.rows[i].cells[j],v,10,GRAY,font=SERIF)
     tborders(t)
-    out=os.path.join(CAT("07"),f"[비품대장] {today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[비품대장] {today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 비품대장 생성({len(items)}건): {out}")
 def vehicle_log(a):
     """🚗 차량 운행일지 — 일자·운전자·행선지·거리(km)·주유(누적). --driver/--dest 지정 시 추가 후 일지 재생성."""
@@ -5629,7 +7278,7 @@ def vehicle_log(a):
             ctext(t.rows[i].cells[j],v,10,GRAY,font=SERIF)
     tborders(t)
     para(d,"※ 표에 직접 손으로 적으시거나, 프로그램 '차량운행일지' 카드에 운전자·행선지·거리를 넣어 실행하면 자동으로 채워집니다.",9,LG,before=6,font=SANS)
-    out=os.path.join(CAT("07"),f"[차량운행일지] {today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("07"),f"[차량운행일지] {today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 차량 운행일지 생성({len(rows_)}건): {out}")
 
 # ───────── 목회 참고자료(6대 도메인 + 주일학교) — 저작권 안전 지침서 → DOCX/HWP ─────────
@@ -5657,7 +7306,22 @@ _REF_DOCS=[
     ("성경공부","성경공부 인도","_v2참고자료_성경공부.md","bstudy"),
     ("목회자영성","목회자 영성·자기돌봄","_v2참고자료_목회자영성.md","spirit"),
     ("선교","단기선교·비전트립 준비","_v2참고자료_선교.md","mission"),
-    ("새신자교육","새신자 교육 4주 프로그램","_v2참고자료_새신자교육.md","newbeliever"),
+    # ★★교재(대상자용)와 해설집(목회자용)은 ★짝이다 — 표시명에 그 구분을 ★반드시 적는다.
+    #   ★표시명이 곧 파일 이름이 된다: reference() 가 «[참고자료] {title}_{날짜}.docx» 로 저장한다.
+    #   ⇒ 표시명을 안 고치면 ★md 제목만 바뀌고 ★docx 는 옛 이름으로 나온다(worker 실측 2026-08-29).
+    # ★★그리고 _REF_DOCS 는 ★하드코딩 목록이다(폴더 자동탐색이 아니다) — ★여기 없으면 만든 자료가
+    #   ★어디에도 안 뜬다. 파일을 새로 놓았으면 ★이 목록에 넣는 것까지가 «만든 것»이다.
+    # ★순서 주의: _ref_find 의 ★2단계(부분 일치)는 ★목록 순서로 이긴다.
+    #   그래서 ★해설집을 교재보다 ★먼저 둔다 — 「성례」만 치신 분은 ★목회자이므로 해설집으로 간다(실측 확인).
+    # ★★단, 「새신자」는 ★해설집으로 가지 않는다 — ★위쪽 ("전도","전도·새신자",…,"ev") 의 ★제목에
+    #   「새신자」가 들어 있어 ★그쪽이 먼저 걸린다(_ref_find 2단계는 short 뿐 아니라 ★title 도 본다).
+    #   ★이것은 ★내 변경으로 생긴 것이 아니라 ★종전부터 그랬다(실측 확인 · 회귀 아님).
+    #   ★처음엔 「종전 동작이 보존된다」고 적었다가 ★실측에 반증됐다 — ★적기 전에 재라.
+    #   ⇒ 카드(ref-*)는 ★1단계 정확일치라 ★영향 없다. 도메인 칸에 손으로 치실 때만 해당한다.
+    ("새신자교육","새가족 4주 교육 해설집(목회자 지도용)","_v2참고자료_새신자교육.md","newbeliever"),
+    ("새신자교안","새가족 4주 교재(새가족용)","_v2참고자료_새신자교육_교안.md","newbelievertext"),
+    ("성례해설","성례 교육 해설집(목회자 지도용)","_v2참고자료_성례교육_해설집.md","sacguide"),
+    ("성례교안","성례 교육 교재(대상자용)","_v2참고자료_성례교육_교안.md","sacclass"),
     ("새생명축제","새생명 축제(태신자 운동) 준비","_v2참고자료_새생명축제.md","harvest"),
     ("절기사역","교회 절기 사역 준비","_v2참고자료_절기사역.md","season"),
     ("영상제작","무료 영상편집·영상 AI 완전 가이드","_v2참고자료_영상제작.md","video"),
@@ -5700,7 +7364,9 @@ def reference_list(a):
         ok=os.path.exists(os.path.join(ROOT,fn))
         if ok: n+=1
         print(f"  {'✅' if ok else '—'} [{short}] {title}")
-    print(f"\n  총 {n}편 준비됨. 참고자료 섹션에서 원하는 자료 카드를 누르면 문서가 만들어져 바로 열립니다.")
+    # ★[자료 섹션 2026-08-29] 읽을거리 카드가 「📖 자료」 섹션으로 모였다 — ★문장도 같이 고친다
+    #   (전 문구: «참고자료 섹션에서…» — 그 섹션은 이제 없다. 코드를 고치면 문장도 고친다.)
+    print(f"\n  총 {n}편 준비됨. 「📖 자료」 섹션에서 원하는 자료 카드를 누르면 문서가 만들어져 바로 열립니다.")
 def _ref_chapters(md):
     """md를 (머리말줄들, [{num,title,lines}]) 로 분할 — '## ' 레벨2 헤더 기준."""
     head=[]; chaps=[]; cur=None
@@ -5805,6 +7471,15 @@ def reference(a):
     para(d,title+suffix,24,NAVY,True,AL.CENTER,before=1,after=1,font=SANS)
     para(d,today(),9,LG,align=AL.CENTER,after=9,font=SANS); hr(d,"A67C1E",14)
     lines=md.split("\n"); i=0; N=len(lines)
+    # ★★2026-08-29 수리: H1(«# ») 을 ★전부 버리고 있었다(아래 :7437 «i+=1; continue»).
+    #   ★첫 줄 문서 제목은 표지에 이미 있으니 버리는 것이 맞지만, ★본문 중간의 H1 까지 함께 삼켰다.
+    #   ⇒ 실측 피해: 참고자료 10편에서 ★제목 41개가 문서에 안 찍혔다
+    #      (새생명축제 9 · 새신자교육 5 · 여름공과 7권 각 4 · 예배영상방송 3).
+    #   ⇒ 그래서 주인님이 새가족 교육에서 «1주차·2주차 구분이 없어 헷갈린다»고 하셨다 —
+    #      ★md 에는 있었고 ★docx 에만 없었다. 「부록」처럼 ## 로 적힌 것만 살아남아
+    #      ★«어떤 문서는 되고 어떤 문서는 안 되는» 모양이라 원인이 안 보였다.
+    #   ⇒ 수리: ★첫 H1(문서 제목)만 건너뛰고, 그 뒤 H1 은 ★가장 큰 제목(17pt)으로 찍는다.
+    _h1seen=[0]
     while i<N:
         s=lines[i].strip()
         if s.startswith('```'):     # ``` 코드펜스 안 ASCII/파이프 표 → 진짜 DOCX 표로
@@ -5836,7 +7511,11 @@ def reference(a):
         if s.startswith('#### '): para(d,re.sub(r'\*\*','',s[5:]),11,GRAY,True,before=4,after=2,font=SANS); i+=1; continue
         if s.startswith('### '):  para(d,re.sub(r'\*\*','',s[4:]),12.5,GOLD,True,before=6,after=2,font=SANS); i+=1; continue
         if s.startswith('## '):   para(d,re.sub(r'\*\*','',s[3:]),15,NAVY,True,before=10,after=3,font=SANS); i+=1; continue
-        if s.startswith('# '):    i+=1; continue
+        if s.startswith('# '):
+            _h1seen[0]+=1
+            if _h1seen[0]==1: i+=1; continue          # 문서 제목 — 표지에 이미 있다
+            para(d,re.sub(r'\*\*','',s[2:]),17,NAVY,True,before=16,after=5,font=SANS)
+            i+=1; continue
         if s=='---':              hr(d,"D8CBB0",6); i+=1; continue
         if s.startswith('>'):
             buf=[]
@@ -5870,7 +7549,8 @@ def reference(a):
         p=d.add_paragraph(); p.paragraph_format.space_after=Pt(5); _md_runs(p,s,11,SERIF); i+=1
     _add_pagenum(d)
     out=os.path.join(CAT("03"),f"[참고자료] {sanit(title+suffix)}_{today()}.docx")
-    if not _savedoc(d,out): return
+    out=_savedoc(d,out)
+    if not out: return
     print(f"✅ 문서를 만들어 바로 열었습니다{suffix}: {os.path.basename(out)}")
     print("   📄 각 쪽 아래에 페이지 번호가 있습니다. 인쇄(Ctrl+P) 후 '인쇄 범위'에 원하는 쪽(예: 3-5)을 넣으세요.")
     print("   ※ 한글에서 번호가 안 보이면: 인쇄 미리보기를 열거나, 쪽 아무 곳 누르고 자판 F9(필드 새로고침) 한 번.")
@@ -5892,15 +7572,144 @@ def attend_check(a):
         if not recs: print("  (아직 없음) 참석자 이름을 ;로 구분해 넣으세요. 예) --names 김철수;이영희;박믿음")
         return
     names=[n.strip() for n in raw.replace(",",";").split(";") if n.strip()]
-    hit=next((r for r in db["출석"] if r.get("날짜")==date and r.get("예배")==service),None)
+    # ★★W-1 쓰기 (master 규격 v2 B-1 · 2026-08-28) — «누가 나왔나»와 함께 ★«어디를 찍었나»를 남긴다.
+    #   이것이 없으면 읽는 쪽이 «안 나오심»과 ★«아직 안 찍음»을 ★구별할 수 없다.
+    #   ·체크대상     = 이번에 찍은 ★구역 이름들
+    #   ·체크대상명단 = ★저장 당시 그 화면에 떠 있던 ★사람 이름 전부
+    #     ★이름 목록을 함께 남기는 이유: 구역 이름을 바꾸시거나(1구역→2구역) 교인이 구역을 옮기면
+    #     ★그 사람의 과거 «잰 주»가 전부 뒤집힌다 — 어제 ▇▇▁▇ 이던 분이 오늘 ···· 이 된다.
+    #     그건 수리가 아니라 ★과거 판정의 위조다. 이름은 그때 그 사람을 가리키므로 안 흔들린다.
+    묶음raw=(getattr(a,'cells','') or "").strip()
+    묶음들=[_norm_cell(c) for c in 묶음raw.replace(",",";").split(";") if _norm_cell(c)]
+    떠있던이름=[]
+    if 묶음들:
+        묶음집합=set(묶음들)
+        떠있던이름=[m.get("이름") or "" for m in db.get("교인",[])
+                    if (m.get("이름") or "") and _cell_of(m) in 묶음집합]
+        # ★찍어 주신 참석자가 그 구역 명단에 없더라도 ★버리지 않는다(손님·타 구역 참석).
+        for n in names:
+            if n not in 떠있던이름: 떠있던이름.append(n)
+    # ★★옛 레코드를 ★새 형식으로 바꾸지 않는다 (master 부수 확인 답 · 2026-08-28).
+    #   종전에는 (날짜,예배) 만 보고 찾아서, ★옛 형식 레코드에 «체크대상»을 ★사후에 붙였다.
+    #   그러면 그 레코드의 뜻이 ★«전원을 본 주» → «이 구역만 본 주» 로 바뀐다 —
+    #   ★그 주의 범위가 ★줄어든다. 「늘기만 하고 줄지 않는다」 원칙에 어긋난다.
+    #   ⇒ 구역을 적어 저장할 때는 ★이미 새 형식인 레코드에만 합친다. 없으면 ★새로 만든다.
+    #     옛 레코드는 ★그대로 둔다(그 주에 새 형식이 생기면 읽는 쪽이 명단만 쓴다 — V2-1).
+    if 묶음들:
+        hit=next((r for r in db["출석"]
+                  if r.get("날짜")==date and r.get("예배")==service
+                  and isinstance(r.get("체크대상"),list)),None)
+    else:
+        hit=next((r for r in db["출석"] if r.get("날짜")==date and r.get("예배")==service),None)
     if hit:
         for n in names:
             if n not in hit["명단"]: hit["명단"].append(n)
-    else: db["출석"].append({"날짜":date,"예배":service,"명단":names})
+        if 묶음들:
+            # ★같은 주에 묶음별로 ★여러 번 저장하시는 것이 정상이다 — ★합집합으로 쌓는다(★빼지 않는다)
+            기존대상=hit.get("체크대상") if isinstance(hit.get("체크대상"),list) else []
+            기존명단=hit.get("체크대상명단") if isinstance(hit.get("체크대상명단"),list) else []
+            hit["체크대상"]=기존대상+[c for c in 묶음들 if c not in 기존대상]
+            hit["체크대상명단"]=기존명단+[n for n in 떠있던이름 if n not in 기존명단]
+    else:
+        새={"날짜":date,"예배":service,"명단":names}
+        # ★★구역을 안 주셨으면 ★키를 아예 넣지 않는다 — 그래야 읽는 쪽이 ★옛 레코드와 똑같이 다룬다.
+        #   빈 목록([])을 넣으면 «아무 데도 안 찍었다»가 되어 ★전원이 그 주를 잃는다.
+        if 묶음들:
+            새["체크대상"]=묶음들; 새["체크대상명단"]=떠있던이름
+        db["출석"].append(새)
     db["출석"].sort(key=lambda r:r.get("날짜",""),reverse=True); save(db)
     cur=next((r["명단"] for r in db["출석"] if r.get("날짜")==date and r.get("예배")==service),names)
     print(f"✅ 출석 기록: {date} [{service}] · 이 날 누적 {len(cur)}명")
     print("  → 매주 기록하시면 '장기결석자 찾기'가 오래 안 나오신 분을 자동으로 찾아 드립니다.")
+def attend_board(a):
+    """✅ 구역별 52주 출석 ★체크판 — ★보는 판이 아니라 ★찍는 판이다.
+
+       ★★왜 «체크판»인가 (master 부록 · 2026-08-28):
+         「출석판」이라고만 하면 ★보는 판으로 읽힌다. 리뷰어가 실제로 그렇게 읽어
+         «자료가 0주치라 다 빈다»는 경보를 냈다. 목사님도 그렇게 읽으실 수 있다.
+       ★★왜 지금 만드는가: 출석 레코드가 ★0건인 것은 기능이 없어서가 아니라 ★넣을 통로가 불편해서다.
+         그래서 「성도 한눈에 보기」·출석률·심방 판단이 전부 «아직 쌓인 기록이 없습니다»만 띄운다.
+         ⇒ 이 카드는 장식이 아니라 ★다른 카드들을 켜는 스위치다.
+       ★★그래서 «찍은 곳»을 반드시 함께 남긴다 — 안 그러면 1구역을 찍는 순간
+         2·3구역 전원이 그 주 «결석»이 되어 ★없는 결석으로 심방 경보가 울린다(W-1)."""
+    db=load(); ms=db.get("교인",[])
+    묶음raw=(getattr(a,'group','') or "").strip()
+    names_raw=(getattr(a,'names','') or "").strip()
+    date=(getattr(a,'date','') or "").strip() or today()
+    service=(getattr(a,'service','') or "주일예배").strip()
+
+    # ── 묶음별 인원 세기 (★빈칸은 「미배정」으로 모은다 — 사라지지 않게)
+    from collections import defaultdict
+    묶음별=defaultdict(list)
+    for m in ms:
+        if (m.get("상태") or "") in ("전출","전출·이명","이명","사망","고인"): continue
+        if not (m.get("이름") or ""): continue
+        묶음별[_cell_of(m)].append(m)
+
+    if not 묶음raw:
+        print("■ ✅ 구역(셀)별 52주 출석 체크판")
+        if not ms:
+            print("  (아직 등록된 교우가 없습니다 — '교우 등록·수정' 카드로 먼저 넣어 주세요.)"); return
+        # ★「미배정」은 ★구역이 아니다 — 구역 수에서 뺀다(master 승인 2026-08-28).
+        #   종전엔 함께 세어, 구역이 ★하나도 없는 교회에서 «구역(셀) 1개»로 떴다.
+        #   그 화면이 하필 ★배포판을 처음 여실 때 보시는 화면이라, 목사님이
+        #   «구역이 하나 만들어져 있구나»로 읽으실 자리였다. ★숫자와 아래 목록이 서로를 설명해야 한다.
+        _미배정수=len(묶음별.get("미배정",[]))
+        _구역수=len([k for k in 묶음별 if k!="미배정"])
+        print(f"  · 모두 {sum(len(v) for v in 묶음별.values())}명 · 구역(셀) {_구역수}개"
+              + (f" · 아직 배정 안 된 분 {_미배정수}명" if _미배정수 else ""))
+        print("─"*66)
+        for 이름,사람들 in sorted(묶음별.items()):
+            print(f"  · {_pad(이름,20)} {len(사람들):>3}명")
+        print("─"*66)
+        print("  · 위 구역(셀) 이름 하나를 «구역» 칸에 넣고 실행하시면 그 구역의 52주 판이 열립니다.")
+        print("  · 참석하신 분 이름을 «참석자» 칸에 ; 로 구분해 함께 넣으시면 ★그 주에 체크됩니다.")
+        print("  · ★찍으신 구역(셀)만 기록됩니다 — 아직 안 찍은 구역은 «결석»이 아니라 «기록 없음»으로 남습니다.")
+        return
+
+    구역=_norm_cell(묶음raw)
+    사람들=묶음별.get(구역,[])
+    if not 사람들:
+        print(f"■ ✅ 구역(셀)별 52주 출석 체크판 — «{묶음raw}»")
+        print(f"  ★그런 구역(셀)이 없습니다. 지금 있는 구역: "+", ".join(sorted(묶음별.keys())))
+        print("  (구역(셀) 칸을 비우고 실행하시면 전체 목록을 보여 드립니다.)")
+        return
+
+    # ── 찍기 ─────────────────────────────────────────────────────────
+    if names_raw:
+        class _A: pass
+        인자=_A(); 인자.date=date; 인자.service=service
+        인자.names=names_raw; 인자.cells=구역
+        attend_check(인자)                     # ★쓰기는 ★한 곳에서만 한다(두 벌 관리 금지)
+        db=load()                              # 방금 저장한 것을 다시 읽는다
+        print("")
+
+    # ── 판 그리기 ────────────────────────────────────────────────────
+    주키=[]
+    td=datetime.date.today()
+    for i in range(51,-1,-1):
+        주키.append(_wk((td-datetime.timedelta(days=7*i)).isoformat()))
+    print(f"■ ✅ 구역(셀)별 52주 출석 체크판 — «{구역}»  ·  {len(사람들)}명")
+    print(f"   ▇ 나오심   ▁ 안 나오심(★그 주에 이 구역(셀)을 찍으셨을 때만)   · 기록 없음(아직 안 찍음)")
+    print("─"*78)
+    for m in sorted(사람들,key=lambda x:x.get("이름") or ""):
+        st=_attend_stats(db,m.get("이름") or "",weeks=52)
+        막대=st["막대"]
+        찍힘=52-막대.count("·")
+        나옴=막대.count("▇")
+        print(f"  {_pad(m.get('이름') or '',16)} {막대}")
+        print(f"  {' '*16} └ 찍은 주 {찍힘}주 중 {나옴}회 출석"
+              + (f" · ★{st['연속결석']}주 연속 결석" if st["연속결석"]>=2 else ""))
+    print("─"*78)
+    print(f"  · 오른쪽 끝이 이번 주입니다(왼쪽으로 갈수록 예전). 날짜 {date} · {service}")
+    print("  · 참석하신 분 이름을 «참석자» 칸에 ; 로 구분해 넣고 실행하시면 이 판에 바로 반영됩니다.")
+    print("  · ★찍지 않은 주는 «안 나오심(▁)»이 아니라 «기록 없음(·)»으로 둡니다 —")
+    print("    없는 결석을 지어내면 심방 판단이 틀어지기 때문입니다.")
+    # ★문장도 함께 고친다 — 목사님은 문장만 읽으신다(코드만 고치면 화면이 낡는다).
+    print("  · ★그리고 ★등록하시기 전의 주도 세지 않습니다 — 그때는 아직 우리 교회에")
+    print("    계시지 않았으므로 «안 나오심»이 아니라 «해당 없음»입니다(·로 남습니다).")
+    print("    (등록일을 아직 안 적으신 분은 이 기준을 적용하지 않고 그대로 둡니다.)")
+
 def long_absent(a):
     """장기결석자 찾기 — 출석 기록으로 N주(기본 4) 이상 안 나오신 성도를 자동 명단·연락처로. '잃은 양' 챙기기."""
     import datetime as _dt
@@ -5913,20 +7722,32 @@ def long_absent(a):
         dt=r.get("날짜","")
         for nm in r.get("명단",[]):
             if dt>last.get(nm,""): last[nm]=dt
-    absent=[]
+    absent=[]; 신규=[]
     for m in members:
         if (m.get("상태") or "") in ("전출","전출·이명","이명","사망","고인"): continue
         nm=m.get("이름") or ""
         if not nm: continue
+        # ★등록하신 지 아직 `weeks` 주가 안 된 분은 «장기결석»이 아니다.
+        #   등록 전 기간은 «안 나오심»이 아니라 ★«해당 없음»이다 — 그때 그분은 아직 우리 교인이 아니셨다.
+        #   ⑤ 체크판이 :6809-6810 에서 선언한 «없는 결석을 지어내지 않는다»가 여기에도 적용된다.
+        #   ★조용히 빼지 않고 아래에서 몇 분인지 알려 드린다.
+        if _too_new(m, weeks*7): 신규.append(nm); continue
         seen=last.get(nm,"")
         if not seen or seen<cut: absent.append((seen or "출석기록 없음",nm,m.get("소속셀") or "",m.get("연락처") or ""))
     absent.sort(key=lambda x:x[0])
     d=newdoc()
     para(d,f"{CHURCH}  장기결석자 명단 ({weeks}주 이상)",20,NAVY,True,AL.CENTER,after=2,font=SANS)
     para(d,f"기준일 {today()} · {cut} 이후 출석 없는 성도 · 총 {len(absent)}명",11,GRAY,AL.CENTER,after=8,font=SANS)
+    # ★문장도 함께 고친다 — 목사님은 문장만 읽으신다(코드만 고치면 화면이 낡는다).
+    para(d,"※ ★등록 전 기간은 세지 않습니다 — 등록하신 지 얼마 안 된 분은 이 명단에 넣지 않습니다"
+           "(그때는 아직 우리 교회에 계시지 않았으므로 «안 나오셨다»가 아닙니다).",
+         9.5,GRAY,AL.CENTER,after=6,font=SANS)
+    if 신규:
+        para(d,f"※ 그렇게 뺀 분이 {len(신규)}명 있습니다: "+", ".join(신규[:10])+(" 외" if len(신규)>10 else ""),
+             9.5,GRAY,AL.CENTER,after=8,font=SANS)
     if absent:
         t=d.add_table(rows=len(absent)+1,cols=4)
-        for j,h in enumerate(["최근 출석","이름","소속셀","연락처"]):
+        for j,h in enumerate(["최근 출석","이름","구역(셀)","연락처"]):
             ctext(t.rows[0].cells[j],h,11,WHITE,True,SANS,AL.CENTER); shade(t.rows[0].cells[j],"8B2E2E")
         for i,(seen,nm,cell,tel) in enumerate(absent,1):
             ctext(t.rows[i].cells[0],seen,10.5,GRAY,font=SANS,align=AL.CENTER); ctext(t.rows[i].cells[1],nm,11,NAVY,True,SANS)
@@ -5934,9 +7755,295 @@ def long_absent(a):
         tborders(t,"BBBBBB",4)
         para(d,"※ 위 성도들께 안부 연락·심방을 권합니다. 심방 후 '심방 기록 & 브리핑'에 남기세요.",9.5,GRAY,before=8,font=SANS)
     else: para(d,"🎉 최근 모두 잘 나오고 계십니다 — 장기결석자가 없습니다.",12,NAVY,before=6,font=SANS)
-    out=os.path.join(CAT("04"),f"[장기결석자] {today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("04"),f"[장기결석자] {today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 장기결석자 명단({weeks}주+): {out} · {len(absent)}명")
     for seen,nm,cell,tel in absent[:12]: print(f"  · {nm} ({cell}) — 최근출석 {seen}"+(f" · {tel}" if tel else ""))
+    if 신규:
+        print(f"  · 등록하신 지 {weeks}주가 안 된 분 {len(신규)}명은 명단에 넣지 않았습니다 — "
+              + ", ".join(신규[:8]) + (" 외" if len(신규)>8 else ""))
+        print("    (등록 전 기간은 «안 나오심»이 아니라 «해당 없음»이라서 세지 않습니다.)")
+def _wk(dstr):
+    """날짜 → (해, 주차). 주(週) 단위로 세는 자 — 예배는 주 단위로 드리기 때문이다."""
+    try:
+        y,w,_=datetime.date.fromisoformat(dstr).isocalendar(); return (y,w)
+    except Exception: return None
+
+def _norm_cell(s):
+    """구역 이름 맞추기 전 ★정규화 (master 규격 v2 B-4).
+       앞뒤 공백을 떼고 ★안쪽 공백도 하나로 줄인다 — 「1 구역」과 「1구역」이 갈리면
+       ★같은 구역인데 다른 구역으로 읽혀 그 사람의 «잰 주»가 통째로 사라진다."""
+    return "".join((s or "").split())
+
+def _cell_of(m):
+    """그 교인이 속한 ★구역 이름. 비어 있으면 ★「미배정」.
+
+       ★★왜 «미배정»이 필요한가 (master 규격 v2 B-2 · 실측 근거):
+         격리 시험대 교인 150명 중 소속셀 ★빈칸이 53명 = ★35.3% 다.
+         빈칸이면 어떤 «체크대상»과도 안 맞아 그 사람은 ★영구히 «못 잰 사람»이 된다.
+         피해가 막대에서 안 끝난다 — 출석률 분모(len(hs))가 0이 되어
+         「성도 한눈에 보기」의 ★출석률 줄이 아예 안 뜬다. ⇒ 교인 셋 중 하나가 화면에서 사라진다.
+       ★새 낱말을 만들지 않았다 — 이 프로그램이 ★이미 쓰는 말이다(kakao() 의 `bycell[b[2] or '미배정']`)."""
+    return _norm_cell((m or {}).get("소속셀") or "") or "미배정"
+
+def _attend_stats(db, nm, weeks=12):
+    """한 성도의 출석 — ★셀 수 있는 것과 없는 것을 갈라서 돌려준다.
+
+       ★출석 기록이 ★두 종류다(실측):
+         ㉮ {날짜, 예배, 명단:[이름…]}  ← 「주간 출석 체크」가 남긴다. ★이것만 사람을 셀 수 있다.
+         ㉯ {날짜, 예배, 남, 여, 계}    ← 「예배 인원 기록」이 남긴다. ★사람 이름이 없다.
+       ㉯만 있는 주는 «안 나오셨다»가 아니라 ★«셀 수 없다»이다. 그 둘을 섞으면
+       한 번도 빠지지 않으신 분이 결석자로 뜬다 — ★없는 것을 지어내지 않는다."""
+    named=[r for r in db.get("출석",[]) if isinstance(r.get("명단"),list)]
+    unnamed=len(db.get("출석",[]))-len(named)
+    seen={}                                   # (해,주) → 그 주에 이름이 있었나
+    have=set()                                # ★이 사람에 대해 «잰 주»
+    # ★★W-1 수리 (master 규격 v2 · 2026-08-28) — have 를 ★사람마다 다르게 만든다.
+    #   종전에는 그 주에 명단 레코드가 ★하나라도 있으면 그 주가 ★전원에게 «잰 주»가 됐다.
+    #   ⇒ 목사님이 1구역 50명을 찍고 저장하시는 순간 ★2·3구역 전원이 그 주 «결석»이 되고,
+    #     연속결석이 쌓여 ★없는 결석으로 심방 경보가 울린다.
+    #   ⇒ 우리가 모르는 것은 «그 사람이 안 나왔나»가 아니라 ★«그 사람 구역을 아직 안 찍었나»다.
+    _me=next((m for m in db.get("교인",[]) if (m.get("이름") or "")==nm), None)
+    내구역=_cell_of(_me) if _me else None
+    # ★★V2-1 수리 (리뷰어 지적 · master 재정 2026-08-28) — 판정을 ★레코드 단위에서 ★주 단위로 올린다.
+    #   ★종전 결함: 옛 형식 레코드 하나만 있어도 ★조건 없이 그 주를 «잰 주»로 올렸다.
+    #     그런데 `attend_check` 은 ★(날짜, 예배) 로 레코드를 찾으므로 ★같은 주에
+    #     주일예배(옛) + 수요예배(새) 가 ★따로 생긴다. 그리고 「주간 출석 체크」 카드가 살아 있어
+    #     옛 형식은 ★앞으로도 계속 생긴다. ⇒ ★가정이 아니라 ★정상 사용에서 난다.
+    #     그러면 아무리 정확히 찍어도 ★안 찍은 구역 전원이 ▁(안 나오심)이 되고 연속결석 경보까지 울린다.
+    #   ★수리: ①그 주에 ★새 형식이 하나라도 있으면 → ★새 규칙만 적용(옛 형식은 ★명단만 쓴다)
+    #          ②하나도 없으면 → 옛 규칙 그대로(전원 «잰 주»)
+    #   ⇒ ★순수 옛 주는 결과가 ★완전히 같다. ★소급 변경 0 — 「과거 판정을 위조하지 않는다」 그대로다.
+    새형식주={_wk(r.get("날짜","")) for r in named if isinstance(r.get("체크대상"),list)}
+    새형식주.discard(None)
+    for r in named:
+        k=_wk(r.get("날짜",""))
+        if not k: continue
+        대상=r.get("체크대상")
+        if not isinstance(대상,list):
+            # ★옛 레코드(체크대상 키가 ★없음) — 그 주에 ★새 형식이 ★하나도 없을 때만 옛 규칙을 쓴다.
+            #   ★섞인 주에서는 이 레코드의 ★명단만 쓰고(아래 seen), ★«전원 잰 주»로는 올리지 않는다.
+            if k not in 새형식주: have.add(k)
+        else:
+            # ★새 레코드 — ★합집합으로 판정한다(늘기만 하고 ★줄지 않는다).
+            #   ①이름 목록에 있으면 «잰 주» ②없으면 구역 이름으로 폴백.
+            #   ★①이 먼저인 이유: 구역 이름을 바꾸거나 교인이 구역을 옮기면 ★과거가 소급 변경된다.
+            #     저장 당시 화면에 떠 있던 ★이름을 남겨 두면 개명·전입·조직개편에 안 흔들린다.
+            명단표=r.get("체크대상명단")
+            if isinstance(명단표,list) and nm in 명단표: have.add(k)
+            elif 내구역 and 내구역 in {_norm_cell(c) for c in 대상}: have.add(k)
+        # ★B-5 — 출석했다는 사실은 ★구역 매칭보다 항상 강하다.
+        #   명단에 이름이 있으면 «잰 주»가 아니어도 ▇ 다(아래 막대 판정 순서를 ★뒤집지 마라).
+        if nm in r["명단"]: seen[k]=True
+    # ★★C 수리 (master 판정 2026-08-28 · worker-2 전수 실기에서 나온 결함) —
+    #   ★등록하시기 ★전의 주는 «잰 주»가 아니다. 그 주에 교회는 출석을 찍었지만
+    #   ★그분은 아직 우리 교인이 아니셨다. 모르는 것이 아니라 ★해당 없음이다.
+    #   ⇒ have 에서 빼면 막대가 ▁(안 나오심)이 아니라 ★·(기록 없음)으로 남는다.
+    #     이 카드가 :6809-6810 에서 스스로 선언한 «없는 결석을 지어내지 않는다»가 바로 이것이다.
+    #   ★등록일이 ★비어 있으면 하한을 걸지 않는다 — 모르는 것을 «오늘 등록»으로 접지 않는다.
+    #     (0/오늘 로 접는 함정은 이 파일 :414-415 가 이미 경고한다.)
+    #   ★연속결석·올해 n/m 도 have 를 쓰므로 ★이 한 줄로 함께 바로잡힌다.
+    _regk=_wk((_me.get("등록일") or "").strip()) if _me else None
+    if _regk: have={k for k in have if k>=_regk}
+    td=datetime.date.today()
+    bars=[]; keys=[]
+    for i in range(weeks-1,-1,-1):
+        k=_wk((td-datetime.timedelta(days=7*i)).isoformat())
+        keys.append(k)
+        bars.append("▇" if seen.get(k) else ("▁" if k in have else "·"))
+    # ★연속 결석 — «명단이 있는 주»만 센다(기록 없는 주는 결석이 아니다)
+    run=0
+    for k in reversed(keys):
+        if k not in have: continue
+        if seen.get(k): break
+        run+=1
+    yr=str(td.year); lyr=str(td.year-1)
+    def rate(y):
+        hs=[k for k in have if str(k[0])==y]
+        return (sum(1 for k in hs if seen.get(k)), len(hs))
+    return {"막대":"".join(bars),"주수":weeks,"연속결석":run,
+            "올해":rate(yr),"작년":rate(lyr),
+            "명단기록":len(named),"인원수만":unnamed,
+            "마지막":max([r.get("날짜","") for r in named if nm in r["명단"]], default="")}
+
+def _giving_stats(db, nm, months=6):
+    """한 성도의 헌금 — ★이름이 안 적힌 헌금이 있으면 반드시 함께 알린다.
+       ★재정 기록의 «교인» 칸은 선택 입력이다. 비어 있으면 누가 내셨는지 프로그램은 모른다.
+         그걸 숨기면 목사님이 «내 헌금이 왜 이것밖에 안 되지» 하신다 — 합계보다 그 한 줄이 중요하다."""
+    inc=[r for r in db.get("재정",[]) if r.get("구분")=="수입"]
+    mine=[r for r in inc if (r.get("교인") or "").strip()==nm]
+    nameless=[r for r in inc if not (r.get("교인") or "").strip()]
+    td=datetime.date.today(); yr=str(td.year); lyr=str(td.year-1)
+    def amt(rs): return sum(int(r.get("금액") or 0) for r in rs)
+    flow=[]
+    for i in range(months-1,-1,-1):
+        y,mo=td.year,td.month-i
+        while mo<=0: mo+=12; y-=1
+        key=f"{y}-{mo:02d}"
+        flow.append((key, amt([r for r in mine if (r.get("날짜") or "").startswith(key)])))
+    kinds={}
+    for r in mine:
+        k=(r.get("항목") or "기타").strip() or "기타"
+        kinds[k]=kinds.get(k,0)+int(r.get("금액") or 0)
+    last=max([r.get("날짜","") for r in mine], default="")
+    gap=None
+    if last:
+        try: gap=(td-datetime.date.fromisoformat(last)).days//7
+        except Exception: gap=None
+    return {"흐름":flow,"종류":sorted(kinds.items(),key=lambda x:-x[1]),
+            "올해":amt([r for r in mine if (r.get("날짜") or "").startswith(yr)]),
+            "작년":amt([r for r in mine if (r.get("날짜") or "").startswith(lyr)]),
+            "전체":amt(mine),"마지막":last,"끊긴주":gap,
+            "이름없는건수":len(nameless),"이름없는금액":amt(nameless)}
+
+def _glance_line(at, gv):
+    """맨 위 「한눈에」 한 줄 — ★숫자를 말하고 ★판단은 목사님 몫으로 남긴다.
+       ★«안정»·«주의» 같은 등급 라벨을 붙이지 않는다. 프로그램이 사람을 등급으로 부르기 시작하면
+         그 판단이 틀렸을 때 목사님이 그 틀린 판단 위에서 심방을 가시게 된다."""
+    bits=[]
+    n,tot=at["올해"]
+    if at["명단기록"]==0: bits.append("출석 기록 없음")
+    else:
+        got=at["막대"].count("▇"); cnt=at["주수"]-at["막대"].count("·")
+        # ★★R7-N1 (리뷰어 · master 재정 2026-08-28) — 한 화면의 두 숫자가 ★분모가 다른데 그 말이 없었다.
+        #   · 이 줄의 분모 cnt = 주수 − 중점(·) = ★기록이 있는 주만 센다
+        #   · 아래 출석 절의 분모 = ★달력 12주 (그쪽은 범례가 있어 괜찮다)
+        #   ⇒ 두 숫자를 ★통일하지 않는다 — 서로 다른 분모가 ★맞다.
+        #     고칠 것은 값이 아니라 ★말이다: 분모가 무엇인지 문장에 적는다.
+        if cnt: bits.append(f"최근 ★기록 있는 {cnt}주 중 {got}회 출석")
+        if at["연속결석"]>=2: bits.append(f"{at['연속결석']}주 연속 결석")
+        if tot: bits.append(f"올해 {n}/{tot}주")
+    if not gv["마지막"]: bits.append("헌금 기록 없음")
+    elif gv["끊긴주"] is not None and gv["끊긴주"]>=8:
+        bits.append(f"헌금 {gv['끊긴주']//4}개월 끊김")
+    elif gv["끊긴주"] is not None:
+        bits.append(f"마지막 헌금 {gv['끊긴주']}주 전")
+    return " · ".join(bits) if bits else "아직 쌓인 기록이 없습니다"
+
+_REL_ORDER=["아버지","어머니","부모","시아버지","시어머니","장인","장모",
+            "남편","아내","배우자","형","누나","오빠","언니","동생","형제","자매",
+            "아들","딸","자녀","손자","손녀","며느리","사위"]
+def _family_tree(m):
+    """가족 관계 자료로 ★가계도를 그린다 — ★새로 입력받지 않는다(이미 있는 것으로만).
+       ★관계를 모르는 분은 «관계 미기재»로 ★그대로 둔다. 짐작해서 위아래로 놓지 않는다."""
+    fam=m.get("가족",[]) or []
+    nm=m.get("이름","")
+    if not fam: return []
+    def bucket(rel):
+        r=(rel or "").strip()
+        if any(x in r for x in ("아버지","어머니","부모","시아","시어","장인","장모")): return "위"
+        if any(x in r for x in ("남편","아내","배우자")): return "옆"
+        if any(x in r for x in ("아들","딸","자녀","손자","손녀","며느리","사위")): return "아래"
+        if any(x in r for x in ("형","누나","오빠","언니","동생","형제","자매")): return "옆형제"
+        return "기타"
+    g={"위":[],"옆":[],"옆형제":[],"아래":[],"기타":[]}
+    for f in fam: g[bucket(f.get("관계"))].append(f)
+    L=[]
+    def nmrel(f):
+        r=(f.get("관계") or "").strip()
+        return f"{f.get('이름','')}({r})" if r else f"{f.get('이름','')}(관계 미기재)"
+    if g["위"]:
+        L.append("        " + "   ".join(nmrel(f) for f in g["위"]))
+        L.append("             │")
+    mid=f"  ▶ {nm}"
+    if g["옆"]: mid+= " ─── " + " · ".join(nmrel(f) for f in g["옆"])
+    L.append(mid)
+    if g["옆형제"]:
+        L.append("     (형제자매) " + " · ".join(nmrel(f) for f in g["옆형제"]))
+    if g["아래"]:
+        L.append("             │")
+        L.append("        " + "   ".join(nmrel(f) for f in g["아래"]))
+    if g["기타"]:
+        L.append("     (관계를 안 적으신 분) " + " · ".join(nmrel(f) for f in g["기타"]))
+        L.append("     ※ '교우 등록·수정'의 '가정 식구' 칸에 «이름:관계» 로 적으시면 자리를 잡아 드립니다.")
+    return L
+
+def member_glance(a):
+    """👤 성도 한눈에 보기 — 한 성도의 신앙생활을 한 화면에 모아 봅니다.
+       ★맨 위 「한눈에」 한 줄로 상태를 먼저 알려 드리고, 그 아래에 근거가 되는 숫자를 폅니다.
+       ★등급을 매기지 않습니다 — 숫자를 보여 드리고 판단은 목사님께 남깁니다."""
+    name=(getattr(a,'name','') or "").strip()
+    if not name:
+        print("■ 👤 성도 한눈에 보기"); print("  성도 이름을 넣고 실행해 주세요.")
+        print("  ▸ 교우 조회 결과에서 ★이름을 누르셔도 이 화면이 열립니다."); return
+    db=load(); hit=find(db,name)
+    if not hit:
+        print(f"✗ '{name}' 님을 찾지 못했습니다. '교우 등록·수정 & 조회'에서 확인해 주세요."); return
+    m=hit[0]; nm=m.get("이름") or name
+    at=_attend_stats(db,nm); gv=_giving_stats(db,nm)
+
+    head=" / ".join([x for x in [m.get('직분'),m.get('소속셀'),m.get('연락처')] if x])
+    print("═"*52)
+    print(f"  👤 {nm}" + (f"   {head}" if head else ""))
+    print("═"*52)
+    print(f"  ■ 한눈에 — {_glance_line(at,gv)}")
+    print("─"*52)
+
+    print("  ■ 출석")
+    if at["명단기록"]==0:
+        print("     아직 출석 기록이 없습니다 — 「주간 출석 체크」 카드에 참석자 이름을 넣으시면")
+        print("     그 다음 주부터 여기에 쌓입니다.")
+    else:
+        print(f"     최근 {at['주수']}주   {at['막대']}      (▇ 나오심 · ▁ 안 나오심 · · 기록 없는 주)")
+        n,tot=at["올해"]; ln,ltot=at["작년"]
+        if tot: print(f"     올해 {n}/{tot}주 출석" + (f"   ·   작년 같은 축으로 {ln}/{ltot}주" if ltot else ""))
+        if at["연속결석"]>=1: print(f"     ★{at['연속결석']}주 연속 안 나오셨습니다 (기록이 있는 주만 세었습니다)")
+        if at["마지막"]: print(f"     마지막으로 뵌 날 {at['마지막']}")
+    if at["인원수만"]:
+        print(f"     ※ 이름 없이 인원수만 적힌 예배 기록이 {at['인원수만']}회 있습니다 —")
+        print("        그 주는 «안 나오셨다»가 아니라 ★«셀 수 없다»로 두었습니다.")
+    print()
+
+    print("  ■ 헌금")
+    if not gv["마지막"]:
+        print("     이 성도 이름으로 기록된 헌금이 없습니다 — 「재정 기록」의 '교인' 칸에")
+        print("     이름을 넣어 기록하시면 여기에 쌓입니다.")
+    else:
+        mx=max([v for _,v in gv["흐름"]] or [0]) or 1
+        for k,v in gv["흐름"]:
+            bar="█"*max(0,round(v*14/mx))
+            print(f"     {k}  {v:>10,}원  {bar}")
+        print(f"     올해 {gv['올해']:,}원   ·   작년 {gv['작년']:,}원   ·   전체 {gv['전체']:,}원")
+        if gv["종류"]:
+            print("     종류별  " + " · ".join(f"{k} {v:,}원" for k,v in gv["종류"][:5]))
+        print(f"     마지막 헌금 {gv['마지막']}" + (f" ({gv['끊긴주']}주 전)" if gv["끊긴주"] is not None else ""))
+    if gv["이름없는건수"]:
+        print(f"     ※ ★이름이 안 적힌 헌금이 {gv['이름없는건수']}건({gv['이름없는금액']:,}원) 있습니다 —")
+        print("        누가 내신 것인지 알 수 없어 ★위 합계에 안 들어갔습니다.")
+        print("        「재정 기록」의 '교인' 칸을 채우시면 그때부터 잡힙니다.")
+    print()
+
+    tree=_family_tree(m)
+    print("  ■ 가족")
+    if tree:
+        for ln in tree: print("   "+ln)
+    else:
+        print("     가족이 아직 등록되지 않았습니다 — 「교우 등록·수정」의 '가정 식구' 칸에")
+        print("     «김영희:아내; 홍길동:아들» 처럼 적으시면 여기에 가계도로 그려 드립니다.")
+    print()
+
+    for lbl,key,fmt in [("직분","직분",None),("구역(셀)","소속셀",None),("생일","생년월일",None),
+                        ("등록일","등록일",None)]:
+        if m.get(key): print(f"  · {lbl}: {m[key]}" + (f" ({m.get('생일양음')})" if key=="생년월일" and m.get("생일양음") else ""))
+    _sac=" · ".join(f"{l} {m.get(k)}" for l,k in [("유아세례","유아세례일"),("학습","학습일"),("세례","세례일"),("입교","입교일")] if m.get(k))
+    if _sac: print(f"  · 성례: {_sac}")
+    vs=m.get("심방이력",[])
+    print()
+    print("  ■ 심방")
+    if vs:
+        for v in sorted(vs,key=lambda x:x.get('날짜',''),reverse=True)[:4]:
+            print(f"     · {v.get('날짜','')} [{v.get('구분','')}] {(v.get('말씀','') or v.get('내용','') or '').strip()[:40]}")
+    else:
+        print("     심방 기록이 없습니다 — 「심방 센터」에서 다녀오신 뒤 기록하시면 여기 쌓입니다.")
+    pr=m.get("기도제목누적",[])
+    if pr:
+        print("  ■ 기도제목")
+        for p in pr[-5:]: print(f"     · {p}")
+    else:
+        print("  ■ 기도제목")
+        print("     아직 없습니다 — 「심방 센터」의 '기도제목' 칸에 적으시면 모입니다.")
+    print("─"*52)
+    print("  ※ 개인정보 화면입니다 — 다른 분이 보지 않게 해 주세요.")
+
 def member_card(a):
     """교인 목양 카드 — 한 성도의 정보·가족·심방이력·기도제목·양육·경조사·헌금요약·최근출석을 한 장으로. 심방 전 파악용."""
     name=(getattr(a,'name','') or "").strip()
@@ -5964,7 +8071,7 @@ def member_card(a):
     _oh=m.get("직분이력",[])
     _ohl=(" → ".join(f"{(o.get('날짜','') or '')[:4]} {o.get('직분','')}".strip() for o in _oh)) if len(_oh)>1 else ""
     for k,v in [("생년월일",_bd),("성별",m.get("성별","")),("연락처",m.get("연락처","")),("주소",m.get("주소","")),
-                ("직분",m.get("직분","")),("직분 연혁",_ohl),("소속셀",m.get("소속셀","")),("인도자",m.get("인도자","")),
+                ("직분",m.get("직분","")),("직분 연혁",_ohl),("구역(셀)",m.get("소속셀","")),("인도자",m.get("인도자","")),
                 ("결혼상태",m.get("결혼상태","")),("결혼기념일",m.get("결혼기념일","")),("학력",m.get("학력","")),("직장",m.get("직장","")),("차량",m.get("차량","")),
                 ("성례",_sac),("등록",_reg or m.get("등록일","")),("최근 출석",last or "기록 없음")]:
         if v: para(d,f"  · {k}: {v}",11,after=1)
@@ -5988,7 +8095,7 @@ def member_card(a):
     sec("■ 헌금 (참고)")
     para(d,f"  · 올해({yr}) 합계 {gy:,}원  ·  전체 누적 {gtot:,}원",11,after=1)
     para(d,"  ※ 개인정보 카드입니다 — 취급에 유의하세요.",9,GRAY,before=6,font=SANS)
-    out=os.path.join(CAT("04"),f"[목양카드] {sanit(nm)}_{today()}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("04"),f"[목양카드] {sanit(nm)}_{today()}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 목양 카드: {out}")
     print(f"  {nm} · {m.get('직분','')} · {m.get('소속셀','')} · 심방 {len(visits)}회 · 최근출석 {last or '기록없음'} · 기도제목 {len(prayers)}개")
 def sermon_plan(a):
@@ -6023,7 +8130,7 @@ def sermon_plan(a):
         if lab: shade(t.rows[i].cells[1],"FBF3E4")
     tborders(t,"BBBBBB",4)
     para(d,"※ 절기는 자동 표시했습니다. 각 주일 본문·제목·시리즈를 채워 연간 설교를 미리 계획하세요.",9.5,GRAY,before=8,font=SANS)
-    out=os.path.join(CAT("09"),f"[연간설교계획] {y}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("09"),f"[연간설교계획] {y}.docx"); out=_savedoc(d,out) or out
     print(f"✅ {y}년 연간 설교 계획표: {out} (주일 {len(sundays)}회 · 절기 {len(special)}개 자동표시)")
 def offering_tally(a):
     """주일 헌금 봉투 집계표 (인쇄용 양식) — 헌금 세는 분들이 봉투별 이름·금액을 적어 종류별로 합산하는 표.
@@ -6047,11 +8154,15 @@ def offering_tally(a):
     tborders(t,"AAAAAA",4)
     para(d,"※ 봉투별로 이름과 금액을 적고, 세로줄(종류별)로 더해 맨 아래 ‘합계’ 칸에 적으세요.",9.5,GRAY,before=8,after=1,font=SANS)
     para(d,"   그 종류별 합계를 프로그램 ‘재정 기록(수입/지출)’ 카드에 입력하시면 출납부·결산서에 자동으로 반영됩니다.",9.5,GRAY,after=1,font=SANS)
-    out=os.path.join(CAT("06"),f"[헌금봉투집계표] {date}.docx"); _savedoc(d,out)
+    out=os.path.join(CAT("06"),f"[헌금봉투집계표] {date}.docx"); out=_savedoc(d,out) or out
     print(f"✅ 주일 헌금 봉투 집계표: {out}  (인쇄해서 헌금 세실 때 사용 · {nrows}줄)")
 def ask_ai(a):
-    """🤖 AI에게 더 깊이 물어보기 — 주제를 넣으면, 그 주제를 깊이 공부·묵상할 좋은 질문들과
-       ChatGPT·제미나이·클로드 등 무료 AI 여는 링크를 만들어 드립니다(붙여넣기·API키/비용 0)."""
+    """🤖 AI에게 더 깊이 물어보기 — 주제를 넣으면, 그 주제를 깊이 공부·묵상할 ‘좋은 질문’ 8개와
+       무료 AI 여는 링크를 만들어 드립니다(붙여넣기·API키/비용 0).
+       ★AI 주소 유지 = 오너 재결정(2026-08-29 «앞으로 발전상을 위해 그대로 두자»).
+         한때 뺐다가 되돌린 자리다 — 다시 빼려면 오너 지시가 있어야 한다.
+       ★단 이 카드가 하는 일은 «AI 실행»이 아니라 ★«질문지 생성»이다(문구가 그 이상을 약속하면 안 된다).
+       ★주소는 바뀔 수 있다 — 링크가 죽으면 그 문서는 거짓이 되니 주기적으로 확인할 것."""
     topic=(getattr(a,'topic','') or "").strip()
     if not topic:
         print("주제나 궁금한 것을 적어 주세요.  예)  --topic 은혜   /   --topic 청지기의 삶   /   --topic 요한복음 3장 16절"); return
@@ -6088,7 +8199,7 @@ def main():
         for fl in flags: sp.add_argument("--"+fl, dest=fl)
         sp.set_defaults(func=fn); return sp
     add("help",helpcmd)
-    add("member-add",member_add,"name","sex","birth","birthtype","tel","addr","role","officedate","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","cycle","memo","date","family")
+    add("member-add",member_add,"name","sex","birth","birthtype","tel","addr","role","officedate","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","cycle","memo","date","family","newf")
     add("member-import",member_import,"file","sheet","dup","apply")
     add("finance-import",finance_import,"file","sheet","year","shape","apply","allowneg")
     add("member-update",member_update,"name","sex","birth","birthtype","tel","addr","role","cell","leader","baptism","baptismdate","catechism","infantbaptism","confirm","regpath","prevchurch","transferdate","edu","job","marital","wedding","car","memo","date")
@@ -6097,6 +8208,8 @@ def main():
     add("office-add",office_add,"name","role","memo","date")
     add("office-list",office_list,"name")
     ml=add("member-list",member_list,"cell")
+    add("member-roster",member_roster,"sort","cell")
+    add("sms-open",sms_open,"names","text","cell")
     add("member-show",member_show,"name")
     add("family-add",family_add,"name","member","relation","birth","role","tel")
     add("family-list",family_list,"name")
@@ -6165,6 +8278,8 @@ def main():
     add("newfamily-step",newfamily_step,"name","how","by","note","date")
     add("newfamily-board",newfamily_board)
     add("newfamily-graduate",newfamily_graduate,"name","role")
+    add("member-restore",member_restore_existing,"names","apply","undo")
+    add("member-glance",member_glance,"name")
     add("sermon-log",sermon_log,"date","title","text","service","series","points")
     add("sermon-list",sermon_list,"query","text","year","service")
     add("sermon-reuse",sermon_reuse,"query","text","title","theme","service","date")
@@ -6176,7 +8291,8 @@ def main():
     add("careevent-add",careevent_add,"kind","name","note","amount","action","date","jik","occasion","role")
     add("ask-ai",ask_ai,"topic")
     add("offering-tally",offering_tally,"date","rows")
-    add("attend-check",attend_check,"date","names","service")
+    add("attend-check",attend_check,"date","names","service","cells")
+    add("attend-board",attend_board,"group","names","date","service")
     add("long-absent",long_absent,"weeks")
     add("member-card",member_card,"name")
     add("sermon-plan",sermon_plan,"year")
@@ -6186,7 +8302,7 @@ def main():
     add("agenda",agenda,"days")
     add("hwp",hwp_convert,"file","recent")
     add("print-file",print_file,"file")
-    add("ppt",ppt_lyrics,"songs","title")
+    add("ppt",ppt_lyrics,"songs","title","form")   # ★[M2 통합] form= 형식(비우면 PPT · 「문서」면 가사 스크린)
     add("read-file",read_file,"file")
     add("giving-ledger",giving_ledger,"name","year")
     add("donation-receipt",donation_receipt,"name","year")
@@ -6199,14 +8315,19 @@ def main():
     add("event-plan",event_plan,"title","date","place","theme","host")
     add("version",version)
     add("backup",backup)
-    ph=add("phoenix",phoenix,"restore"); ph.add_argument("--last",action="store_true")
+    # ★«--last» 는 값이 있어도 없어도 받는다 — 값 없이 쓰던 기존 사용법(«phoenix --last»)을 그대로 두고,
+    #   화면 카드가 보내는 «--last 1» 도 함께 받기 위해서다. const 는 «단독으로 왔을 때»의 값이다.
+    ph=add("phoenix",phoenix,"restore"); ph.add_argument("--last",nargs='?',const="1",default="")
     add("update",update,"file")
     add("update-check",update_check)
+    add("update-undo",update_undo,"stamp","apply")
     add("setup",church_setup,"church","pastor")
     add("congrats",congrats,"occasion","kind","name","jik","role")
     add("sacrament-add",sacrament_add,"kind","name","birth","addr","date","by","text","memo")
     add("sacrament-ledger",sacrament_ledger,"kind")
     add("sacrament-apply",sacrament_apply,"kind","name","birth","addr","tel","cell","leader","mode","purpose")
+    add("communion",communion,"date","service","note")
+    add("sacrament-class",sacrament_class,"kind","names","date","note")
     add("harvest-plan",harvest_plan,"title","dday")
     add("harvest-checklist",harvest_checklist,"title","date")
     add("cell-worship",cell_worship,"title","text","date","leader")
@@ -6225,7 +8346,7 @@ def main():
     add("menu",menu)
     add("bible",bible,"ref","version")
     add("bible-plan",bible_plan,"type","date","dept")
-    add("bible-quiz",bible_quiz,"ref","version","count","type","level","dept")
+    add("bible-quiz",bible_quiz,"ref","version","count","type","level","dept","verses","source")
     add("memory-verse",memory_verse,"refs","set","version","dept")
     add("reference-list",reference_list)
     add("reference",reference,"name","hwp","part","toc")
@@ -6250,6 +8371,30 @@ def main():
     add("export-excel",export_excel)
     a=p.parse_args()
     if not getattr(a,"cmd",None): helpcmd(a); return
+    # ★★D 수리 (master 판정 2026-08-28 · worker-2 전수 실기) — 화면에 ★영어 «None» 이 뜨지 않게 한다.
+    #   ★기전: 칸을 비우고 실행하시면 argparse 가 그 칸에 ★None 을 넣는다. 그 None 이 안내문의
+    #     f-string 에 그대로 들어가 목사님 화면에 «✗ 소그룹 'None' 없음» 처럼 ★영어가 뜬다.
+    #   ★실측: 등록 명령 195개를 빈 인자로 전부 눌러 ★13개에서 발화(정적 후보 40 중 실제로 뜨는 것).
+    #   ★무늬는 «카드 두 개»가 아니라 «인자를 검사 없이 문장에 끼우는 ★모든 자리»다.
+    #     그래서 자리마다 고치지 않고 ★들어오는 문턱에서 한 번에 없앤다 —
+    #     앞으로 새로 생길 자리까지 함께 닫힌다(고치는 곳이 하나여야 규율이 안 갈린다).
+    #   ★값을 바꾸지 않는다. None → 빈 문자열로만 바꾼다(저장 경로는 이미 `or ""` 로 걸러져 있고,
+    #     이 파일에 `a.<칸> is None` 으로 판정하는 자리는 ★0건임을 확인했다).
+    for _k,_v in list(vars(a).items()):
+        if _v is None and _k not in ("func","cmd"): setattr(a,_k,"")
+    # ★그리고 꼭 있어야 하는 칸이 비었으면 «'' 없음» 같은 반쪽 문장 대신
+    #   ★무엇을 넣으셔야 하는지 알려 드린다(다른 카드들이 이미 쓰는 집안 문체 그대로).
+    _필수={"member-show":("name","교인 이름을"), "visit-brief":("name","교인 이름을"),
+           "family-list":("name","교인 이름을"), "group-assign":("name","교인 이름을"),
+           "group-report":("name","소그룹(구역·셀) 이름을"), "newfamily-step":("name","새가족 이름을"),
+           "newfamily-graduate":("name","새가족 이름을"), "vip-contact":("name","태신자 이름을"),
+           "vip-convert":("name","태신자 이름을"), "illus-add":("name","예화 이름을"),
+           "donation-receipt":("name","교인 이름을"), "sermon-reuse":("query","찾으실 검색어를"),
+           "commentary-add":("pdf","주석 PDF 파일 경로를")}
+    if a.cmd in _필수:
+        _f,_라벨=_필수[a.cmd]
+        if not str(getattr(a,_f,"") or "").strip():
+            print(f"⚠ {_라벨} 입력해 주세요."); return
     try:
         a.func(a)
     except PermissionError as e:
